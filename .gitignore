@@ -1,0 +1,29 @@
+# Secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Vector store / local DB
+chroma_db/
+*.sqlite3
+*.db
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Node (if Phase 3 goes React)
+node_modules/
+dist/
+build/
+
+# Logs
+*.log

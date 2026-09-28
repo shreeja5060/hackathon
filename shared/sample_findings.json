@@ -1,0 +1,41 @@
+[
+  {
+    "requirement": "Access Control",
+    "coverage": "Full",
+    "finding": "Adequately addressed",
+    "recommendation": "None",
+    "citation": {
+      "chunk_id": "policy-security-002",
+      "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+      "locator": "Section 3.2 Accounts and security controls"
+    },
+    "framework_control": "AC-2",
+    "status": "pending"
+  },
+  {
+    "requirement": "Privileged Access",
+    "coverage": "Partial",
+    "finding": "Review frequency not defined",
+    "recommendation": "Add a periodic review requirement for privileged accounts.",
+    "citation": {
+      "chunk_id": "policy-security-002",
+      "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+      "locator": "Section 3.2 Accounts and security controls"
+    },
+    "framework_control": "AC-2",
+    "status": "pending"
+  },
+  {
+    "requirement": "MFA",
+    "coverage": "Partial",
+    "finding": "MFA is required 'where required' but the scope is never defined.",
+    "recommendation": "Define which systems and user roles require multifactor authentication.",
+    "citation": {
+      "chunk_id": "policy-security-001",
+      "source": "Public_Release_Computer_Security_Policy.pdf",
+      "locator": "Section 3.5 Authentication"
+    },
+    "framework_control": "IA-2",
+    "status": "pending"
+  }
+]

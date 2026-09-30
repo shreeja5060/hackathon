@@ -27,3 +27,5 @@ build/
 
 # Logs
 *.log
+
+/data/processed/

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "environment": "hackathon-demo",
+  "captured_at": "2026-09-30T18:00:00Z",
+  "resources": [
+    {
+      "resource_id": "demo-user-alex",
+      "resource_type": "AWS IAM user",
+      "settings": {
+        "console_access_enabled": true,
+        "mfa_enabled": false
+      }
+    },
+    {
+      "resource_id": "demo-user-sam",
+      "resource_type": "AWS IAM user",
+      "settings": {
+        "console_access_enabled": true,
+        "mfa_enabled": true
+      }
+    },
+    {
+      "resource_id": "demo-user-jordan",
+      "resource_type": "AWS IAM user",
+      "settings": {
+        "console_access_enabled": true,
+        "mfa_enabled": null
+      }
+    },
+    {
+      "resource_id": "demo-bucket-documents",
+      "resource_type": "AWS S3 bucket",
+      "settings": {
+        "bucket_level_block_public_acls": true,
+        "bucket_level_ignore_public_acls": true,
+        "bucket_level_block_public_policy": true,
+        "bucket_level_restrict_public_buckets": true
+      }
+    },
+    {
+      "resource_id": "demo-sg-admin",
+      "resource_type": "AWS security group",
+      "settings": {
+        "inbound_rules": [
+          {
+            "protocol": "tcp",
+            "from_port": 22,
+            "to_port": 22,
+            "ipv4_cidr": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    {
+      "resource_id": "demo-trail",
+      "resource_type": "AWS CloudTrail trail",
+      "settings": {
+        "is_logging": false,
+        "is_multi_region_trail": true
+      }
+    }
+  ]
+}

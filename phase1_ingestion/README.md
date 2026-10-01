@@ -194,3 +194,52 @@ findings. Top-k results can contain weak matches, and absence from search
 results is not proof that a policy lacks a requirement. The policy PDFs are
 sanitized public templates; preserve their publication context when assessing
 missing detail or outdated content.
+
+## Optional synthetic environment evidence
+
+Branch `phase1-environment` adds six synthetic resource records: three IAM users
+(MFA true, false and unknown), one S3 bucket, one security group and one CloudTrail
+trail. `data/examples/synthetic_environment.json` is our normalized demo format,
+**not an AWS API export or evidence from a real account**. No cloud credentials
+or new packages are needed. The parser currently accepts synthetic inputs only.
+
+After the existing policy/framework preparation, run:
+
+```bash
+python -m phase1_ingestion.load_environment
+python -m phase1_ingestion.check_environment
+python phase1_ingestion/chunk_and_embed.py
+python -m phase1_ingestion.check_retriever
+python -m phase1_ingestion.check_environment --index
+```
+
+The indexer includes `data/processed/environment_bundle.json` when present.
+Without it, policy/framework indexing still works. To exclude demo evidence,
+remove that generated bundle and rebuild the index.
+
+Evidence uses the same search contract: `type="evidence"`,
+`doc_kind="system_configuration"`, `page=None`, and a JSON Pointer locator such
+as `/resources/0`. Synthetic status, snapshot time and resource identity are
+included in the passage text so they survive the eight-field response.
+
+```python
+from phase1_ingestion.retriever import search, get_original_chunk
+hits = search("Is MFA enabled for demo-user-alex?", type="evidence", top_k=3)
+original = get_original_chunk(hits[0]["chunk_id"])
+```
+
+New indexes save their originals alongside the collection and reference them in
+its manifest. Exact lookup therefore uses the inputs for that index, rather than
+potentially edited input files. Older manifests still support the original
+policy/framework lookup behavior.
+
+Agent integration must explicitly retrieve evidence; indexing it does not wire
+it into the Auditor automatically. Match resource identities before making a
+finding. A missing setting is unknown, not false. Bucket-level public access
+settings alone do not establish effective access; a security-group rule alone
+does not prove reachability; a trail setting alone does not establish all-account
+logging coverage. The demo supports investigation of these settings, not an
+automatic compliance verdict. Logs and a full asset inventory remain future work.
+
+Validation: offline parser checks run in the development environment. The real
+embedding/index checks must also run with the existing local model and data.

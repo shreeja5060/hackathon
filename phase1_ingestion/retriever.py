@@ -159,10 +159,13 @@ def search(query, type=None, top_k=5):
 def _original_chunks():
     originals = {}
 
-    for filename in ("policy_chunks.json", "framework_chunks.json"):
-        records = json.loads(
-            (PROCESSED / filename).read_text(encoding="utf-8")
-        )
+    manifest, _ = _index()
+    if "originals_file" in manifest:
+        paths = [DB_PATH / manifest["originals_file"]]
+    else:
+        paths = [PROCESSED / name for name in ("policy_chunks.json", "framework_chunks.json")]
+    for path in paths:
+        records = json.loads(path.read_text(encoding="utf-8"))
         for record in records:
             chunk_id = record["chunk_id"]
             if chunk_id in originals:

@@ -3,9 +3,9 @@ anthropic>=0.40.0
 python-dotenv>=1.0.0
 
 # Phase 1: ingestion & RAG
-pymupdf>=1.24.0          # PDF parsing
-chromadb>=0.5.0           # vector store
-sentence-transformers>=3.0.0   # embeddings (or swap for voyageai)
+pymupdf==1.28.2
+chromadb==1.5.9
+sentence-transformers==6.1.0
 
 # Phase 3: dashboard (Streamlit path)
 streamlit>=1.38.0

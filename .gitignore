@@ -29,3 +29,6 @@ build/
 *.log
 
 /data/processed/
+
+# Generated Phase 1 data
+/data/frameworks/

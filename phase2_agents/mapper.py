@@ -1,0 +1,106 @@
+"""
+Phase 2: The Mapper Agent.
+
+Takes requirements the Extractor found (Day 1) and matches each one to the
+NIST control it relates to. Same call pattern as before - the new skill
+today is FEW-SHOT PROMPTING: showing Claude one worked example inside the
+prompt so its answers stay consistent, instead of just describing the task
+in words and hoping.
+"""
+
+import os
+import json
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
+from fake_search import search
+
+load_dotenv()
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+
+# Notice the "Example" block below - this is the few-shot technique.
+# Instead of just TELLING Claude the output format, we SHOW it one, worked,
+# correct example. This dramatically improves consistency across many calls.
+MAPPER_PROMPT = """You are a compliance analyst. You are given ONE extracted \
+policy requirement and a list of candidate NIST controls. Pick the single \
+best-matching control. If none genuinely match, say so.
+
+Example:
+Requirement: "Passwords must not be shared with any other person."
+Candidate controls:
+  - IA-2: Identification and Authentication (multifactor authentication for privileged accounts)
+  - AC-2: Account Management (establishing, activating, reviewing accounts)
+Correct answer:
+{{"control_id": "IA-2", "reasoning": "Password sharing is an authentication integrity issue, which IA-2 governs."}}
+
+Now do the same for this requirement:
+
+Requirement: "{requirement_text}"
+
+Candidate controls:
+{candidate_controls}
+
+Return ONLY JSON in this exact shape:
+{{"control_id": "the best match, or null if none fit", "reasoning": "one sentence why"}}
+"""
+
+
+def format_candidates(chunks: list[dict]) -> str:
+    lines = []
+    for c in chunks:
+        lines.append(f"  - {c['locator']}: {c['text']}")
+    return "\n".join(lines)
+
+
+def map_requirement(requirement: dict) -> dict:
+    """
+    Takes one extracted requirement (from extractor.py) and finds the best
+    matching NIST control using the framework chunks from search().
+    """
+    # Pull candidate NIST controls from our (placeholder) search function
+    candidates = search(requirement["requirement_text"], type="framework")
+    candidates_text = format_candidates(candidates)
+
+    prompt = MAPPER_PROMPT.format(
+        requirement_text=requirement["requirement_text"],
+        candidate_controls=candidates_text
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw_text = response.content[0].text.strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`").replace("json\n", "", 1)
+
+    result = json.loads(raw_text)
+
+    # Attach the mapping result onto the original requirement, so nothing
+    # already known (source, chunk_id, locator) gets lost as data flows
+    # through the pipeline
+    requirement["mapped_control"] = result["control_id"]
+    requirement["mapping_reasoning"] = result["reasoning"]
+    return requirement
+
+
+if __name__ == "__main__":
+    # Load Day 1's output
+    with open("extracted_requirements.json") as f:
+        requirements = json.load(f)
+
+    mapped = []
+    for req in requirements:
+        print(f"\nMapping: {req['requirement']}")
+        result = map_requirement(req)
+        mapped.append(result)
+        print(f"  -> {result['mapped_control']}: {result['mapping_reasoning']}")
+
+    with open("mapped_requirements.json", "w") as f:
+        json.dump(mapped, f, indent=2)
+    print("\nSaved to mapped_requirements.json")

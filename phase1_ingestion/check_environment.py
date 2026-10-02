@@ -34,7 +34,7 @@ def main():
         _, collection = _index()
         for chunk in chunks:
             assert get_original_chunk(chunk['chunk_id']) == chunk
-        stored = collection.get(where={'type': 'evidence'}, include=['metadatas'])
+        stored = collection.get(where={'source': DEFAULT_INPUT.name}, include=['metadatas'])
         assert len(stored['ids']) == 6
         results = search('Is multifactor authentication MFA enabled for demo-user-alex?', type='evidence', top_k=3)
         assert any('demo-user-alex' in result['text'] for result in results)

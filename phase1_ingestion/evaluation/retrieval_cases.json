@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "description": "Small development evaluation, not a held-out benchmark. Expected passages chosen before running these searches.",
+  "cases": [
+    {
+      "id": "policy-password",
+      "query": "Can I give a colleague my password or authentication token?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 3.5 Authentication",
+        "page": 2,
+        "text_contains": [
+          "must not be shared"
+        ]
+      }
+    },
+    {
+      "id": "policy-software",
+      "query": "May I install personal or unapproved software on my work laptop?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 3.2 Applications",
+        "page": 1,
+        "text_contains": [
+          "unapproved software"
+        ]
+      }
+    },
+    {
+      "id": "policy-backup",
+      "query": "Can the only copy of business information be on my laptop?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 3.3 Data storage, transfer, and backup",
+        "page": 1,
+        "text_contains": [
+          "sole copy"
+        ]
+      }
+    },
+    {
+      "id": "policy-media",
+      "query": "What are the rules for storing and disposing of removable media?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 3.4 Removable and external media",
+        "page": 2,
+        "text_contains": [
+          "sanitized"
+        ]
+      }
+    },
+    {
+      "id": "policy-loss",
+      "query": "What should I do if my work device is lost or stolen?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 3.6 Loss prevention and incident reporting",
+        "page": 2,
+        "text_contains": [
+          "reported promptly"
+        ]
+      }
+    },
+    {
+      "id": "policy-exception",
+      "query": "What approvals and safeguards are required for a security policy exception?",
+      "type": "internal",
+      "expected": {
+        "source": "Public_Release_Computer_Security_Policy.pdf",
+        "locator": "Section 4 Enforcement and exceptions",
+        "page": 2,
+        "text_contains": [
+          "expiration date"
+        ]
+      }
+    },
+    {
+      "id": "nist-privileged",
+      "query": "Which requirement calls for multifactor authentication for privileged accounts?",
+      "type": "framework",
+      "expected": {
+        "source": "NIST_SP-800-53_rev5_catalog.json",
+        "locator": "IA-2(1)",
+        "page": null,
+        "text_contains": [
+          "Control statement:",
+          "Implement multi-factor authentication"
+        ]
+      }
+    },
+    {
+      "id": "nist-nonprivileged",
+      "query": "Which requirement calls for multifactor authentication for non-privileged accounts?",
+      "type": "framework",
+      "expected": {
+        "source": "NIST_SP-800-53_rev5_catalog.json",
+        "locator": "IA-2(2)",
+        "page": null,
+        "text_contains": [
+          "Control statement:",
+          "Implement multi-factor authentication"
+        ]
+      }
+    },
+    {
+      "id": "evidence-alex",
+      "query": "Is MFA enabled for demo-user-alex?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/0",
+        "page": null,
+        "text_contains": [
+          "demo-user-alex",
+          "[mfa_enabled]: false",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    },
+    {
+      "id": "evidence-sam",
+      "query": "Is MFA enabled for demo-user-sam?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/1",
+        "page": null,
+        "text_contains": [
+          "demo-user-sam",
+          "[mfa_enabled]: true",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    },
+    {
+      "id": "evidence-jordan",
+      "query": "Do we know whether MFA is enabled for demo-user-jordan?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/2",
+        "page": null,
+        "text_contains": [
+          "demo-user-jordan",
+          "[mfa_enabled]: unknown / not supplied",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    },
+    {
+      "id": "evidence-bucket",
+      "query": "What bucket-level public access block settings are reported for demo-bucket-documents?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/3",
+        "page": null,
+        "text_contains": [
+          "demo-bucket-documents",
+          "[bucket_level_block_public_acls]: true",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    },
+    {
+      "id": "evidence-network",
+      "query": "Which inbound SSH rule is reported for demo-sg-admin?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/4",
+        "page": null,
+        "text_contains": [
+          "demo-sg-admin",
+          "0.0.0.0/0",
+          "\"from_port\": 22",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    },
+    {
+      "id": "evidence-logging",
+      "query": "Is demo-trail currently configured to log events?",
+      "type": "evidence",
+      "expected": {
+        "source": "synthetic_environment.json",
+        "locator": "/resources/5",
+        "page": null,
+        "text_contains": [
+          "demo-trail",
+          "[is_logging]: false",
+          "SYNTHETIC DEMO"
+        ]
+      }
+    }
+  ]
+}

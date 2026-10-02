@@ -163,7 +163,9 @@ def main():
     frameworks = read_json(PROCESSED / "framework_chunks.json")
     environment_path = PROCESSED / "environment_bundle.json"
     environment = read_json(environment_path) if environment_path.exists() else {"chunks": [], "sources": {}}
-    evidence = environment["chunks"]
+    inventory_path = PROCESSED / "inventory_bundle.json"
+    inventory = read_json(inventory_path) if inventory_path.exists() else {"chunks": [], "sources": {}}
+    evidence = environment["chunks"] + inventory["chunks"]
     original_chunks = policies + frameworks + evidence
 
     sources = read_json(PROCESSED / "policy_sources.json")
@@ -178,6 +180,13 @@ def main():
     if sources.keys() & environment["sources"].keys():
         raise ValueError("Duplicate environment source filename")
     sources.update(environment["sources"])
+    if sources.keys() & inventory["sources"].keys():
+        raise ValueError("Duplicate inventory source filename")
+    for inventory_source in inventory["sources"].values():
+        linked_source = environment["sources"].get(inventory_source["linked_configuration"])
+        if linked_source is None or linked_source.get("sha256") != inventory_source["linked_configuration_sha256"]:
+            raise ValueError("Inventory/configuration snapshots differ. Rerun load_environment and load_inventory.")
+    sources.update(inventory["sources"])
 
     if not original_chunks:
         raise ValueError("No chunks found.")

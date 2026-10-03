@@ -58,6 +58,23 @@ def audit_requirement(mapped_requirement: dict) -> dict:
     """
     control_id = mapped_requirement["mapped_control"]
 
+    # If the Mapper found no matching control at all, there is nothing to
+    # audit against - this is itself a finding worth surfacing, not a crash.
+    if not control_id:
+        return {
+            "requirement": mapped_requirement["requirement"],
+            "coverage": "Not observable",
+            "finding": "No matching framework control was found for this requirement in the current framework set.",
+            "recommendation": "Review manually, or expand the framework coverage to include a relevant control.",
+            "citation": {
+                "chunk_id": mapped_requirement["chunk_id"],
+                "source": mapped_requirement["source"],
+                "locator": mapped_requirement["locator"],
+            },
+            "framework_control": None,
+            "status": "pending"
+        }
+
     # Look up the actual NIST control text so Claude can compare against it,
     # not just the control ID
     framework_chunks = search(control_id, type="framework")

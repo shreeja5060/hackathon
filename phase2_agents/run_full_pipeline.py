@@ -39,7 +39,7 @@ def run_full_pipeline() -> list[dict]:
     """
     # top_k set high so we get every policy chunk available, not just the
     # top few matches for one query
-    policy_chunks = search("", type="policy", top_k=100)
+    policy_chunks = search("", type="internal", top_k=100)
     print(f"Found {len(policy_chunks)} policy chunk(s) to process.\n")
 
     full_gap_report = []

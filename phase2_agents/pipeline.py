@@ -114,7 +114,7 @@ app = graph.compile(checkpointer=checkpointer)
 
 if __name__ == "__main__":
     # Grab one real policy chunk to run through the whole pipeline
-    chunk = search("authentication", type="policy")[0]
+    chunk = search("authentication", type="internal")[0]
 
     config = {"configurable": {"thread_id": "demo-run-1"}}
 

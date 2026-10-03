@@ -5,9 +5,19 @@ import streamlit as st
 
 from data_source import COVERAGE_LEVELS, STATUSES
 
-COVERAGE_ICON = {"Full": "🟢 Full", "Partial": "🟡 Partial", "Missing": "🔴 Missing",
-                 "Not observable": "⚪ Not observable"}
-STATUS_ICON = {"pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected"}
+STATUS_LABEL = {"pending": "Pending", "approved": "Approved", "rejected": "Rejected"}
+
+# Translucent fills so the colors read well in both light and dark themes.
+COVERAGE_COLOR = {
+    "Full": "rgba(46, 160, 67, 0.30)",
+    "Partial": "rgba(210, 153, 34, 0.35)",
+    "Missing": "rgba(248, 81, 73, 0.35)",
+    "Not observable": "rgba(139, 148, 158, 0.30)",
+}
+STATUS_COLOR = {
+    "Approved": "rgba(46, 160, 67, 0.30)",
+    "Rejected": "rgba(248, 81, 73, 0.35)",
+}
 
 
 def render_metrics(findings: list[dict]) -> None:
@@ -27,7 +37,7 @@ def render_gap_table(findings: list[dict]) -> str | None:
     controls = sorted({f["framework_control"] for f in findings if f["framework_control"]})
     control = f2.multiselect("NIST control", controls, placeholder="All")
     status = f3.multiselect("Review status", STATUSES, placeholder="All",
-                            format_func=lambda s: STATUS_ICON[s])
+                            format_func=lambda s: STATUS_LABEL[s])
 
     shown = [f for f in findings
              if (not coverage or f["coverage"] in coverage)
@@ -42,14 +52,18 @@ def render_gap_table(findings: list[dict]) -> str | None:
         "ID": f["id"],
         "Requirement": f["requirement"],
         "NIST control": f["framework_control"],
-        "Coverage": COVERAGE_ICON.get(f["coverage"], f["coverage"]),
+        "Coverage": f["coverage"],
         "Finding": f["finding"],
         "Recommendation": f["recommendation"],
-        "Status": STATUS_ICON[f["status"]],
+        "Status": STATUS_LABEL[f["status"]],
     } for f in shown])
 
+    styled = (table.style
+              .map(lambda v: _fill(COVERAGE_COLOR.get(v)), subset=["Coverage"])
+              .map(lambda v: _fill(STATUS_COLOR.get(v)), subset=["Status"]))
+
     event = st.dataframe(
-        table,
+        styled,
         hide_index=True,
         width="stretch",
         on_select="rerun",
@@ -62,3 +76,7 @@ def render_gap_table(findings: list[dict]) -> str | None:
 
     rows = event.selection.rows
     return table.iloc[rows[0]]["ID"] if rows else None
+
+
+def _fill(color: str | None) -> str:
+    return f"background-color: {color}" if color else ""

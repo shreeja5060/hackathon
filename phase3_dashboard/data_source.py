@@ -46,8 +46,27 @@ def normalize(raw_findings: list[dict]) -> list[dict]:
             "cited_text": f.get("cited_text", ""),
             "status": f.get("status", "pending") if f.get("status") in STATUSES else "pending",
             "reviewer_note": f.get("reviewer_note", ""),
+            # Kept so the report can show what the agents originally proposed.
+            "original_recommendation": f.get("recommendation", ""),
+            "recommendation_source": "",   # "" | "reviewer edit" | "chat suggestion"
         })
     return findings
+
+
+def update_recommendation(finding: dict, text: str, source: str) -> bool:
+    """
+    Replace a finding's recommendation after a person accepts the change.
+    An approved finding goes back to pending, since the approval was for the
+    old wording. Returns False if nothing changed.
+    """
+    text = text.strip()
+    if not text or text == finding["recommendation"]:
+        return False
+    finding["recommendation"] = text
+    finding["recommendation_source"] = source
+    if finding["status"] == "approved":
+        finding["status"] = "pending"
+    return True
 
 
 def run_analysis(policy_name: str) -> list[dict]:

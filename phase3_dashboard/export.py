@@ -28,6 +28,12 @@ def to_markdown(findings: list[dict], policy_name: str) -> str:
                  f["finding"], f["recommendation"], source]
         lines.append("| " + " | ".join(str(x).replace("|", "\\|") for x in cells) + " |")
 
+    changed = [f for f in findings if f.get("recommendation_source")]
+    if changed:
+        lines += ["", "## Recommendations changed during review", ""]
+        lines += [f"- **{f['id']} {f['requirement']}** ({f['recommendation_source']}): "
+                  f"originally \"{f['original_recommendation']}\"" for f in changed]
+
     notes = [f for f in findings if f["reviewer_note"]]
     if notes:
         lines += ["", "## Reviewer notes", ""]
@@ -41,11 +47,13 @@ def to_csv(findings: list[dict]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["id", "requirement", "framework_control", "coverage", "finding",
-                     "recommendation", "source", "locator", "chunk_id", "reviewer_note"])
+                     "recommendation", "recommendation_changed_by", "original_recommendation",
+                     "source", "locator", "chunk_id", "reviewer_note"])
     for f in findings:
         c = f["citation"]
         writer.writerow([f["id"], f["requirement"], f["framework_control"], f["coverage"],
-                         f["finding"], f["recommendation"], c["source"], c["locator"],
+                         f["finding"], f["recommendation"], f.get("recommendation_source", ""),
+                         f.get("original_recommendation", ""), c["source"], c["locator"],
                          c["chunk_id"], f["reviewer_note"]])
     return buf.getvalue()
 

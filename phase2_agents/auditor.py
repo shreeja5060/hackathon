@@ -21,7 +21,7 @@ from anthropic import Anthropic
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
-from fake_search import search
+from fake_search import search, get_original_chunk
 
 load_dotenv()
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -75,10 +75,12 @@ def audit_requirement(mapped_requirement: dict) -> dict:
             "status": "pending"
         }
 
-    # Look up the actual NIST control text so Claude can compare against it,
-    # not just the control ID
-    framework_chunks = search(control_id, type="framework")
-    control_text = framework_chunks[0]["text"] if framework_chunks else "Unknown control text"
+    # Fetch the EXACT chunk the Mapper matched, by its chunk_id, rather than
+    # searching again by control_id text - this avoids any chance of a
+    # second search returning a different or no result (per Maryam's note).
+    control_chunk_id = mapped_requirement.get("mapped_control_chunk_id")
+    control_chunk = get_original_chunk(control_chunk_id) if control_chunk_id else None
+    control_text = control_chunk["text"] if control_chunk else "Unknown control text"
 
     prompt = AUDITOR_PROMPT.format(
         requirement_text=mapped_requirement["requirement_text"],

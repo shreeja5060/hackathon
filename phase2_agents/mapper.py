@@ -63,6 +63,10 @@ def map_requirement(requirement: dict) -> dict:
     # Pull candidate NIST controls from our (placeholder) search function
     candidates = search(requirement["requirement_text"], type="framework")
     candidates_text = format_candidates(candidates)
+    # Build a lookup so we can find the exact chunk_id for whichever
+    # control_id Claude picks - this is what lets the Auditor fetch the
+    # EXACT chunk later instead of searching again.
+    control_id_to_chunk_id = {c["locator"]: c["chunk_id"] for c in candidates}
 
     prompt = MAPPER_PROMPT.format(
         requirement_text=requirement["requirement_text"],
@@ -85,6 +89,7 @@ def map_requirement(requirement: dict) -> dict:
     # already known (source, chunk_id, locator) gets lost as data flows
     # through the pipeline
     requirement["mapped_control"] = result["control_id"]
+    requirement["mapped_control_chunk_id"] = control_id_to_chunk_id.get(result["control_id"])
     requirement["mapping_reasoning"] = result["reasoning"]
     return requirement
 

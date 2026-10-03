@@ -99,6 +99,19 @@ def search(query: str, type: Optional[str] = None, top_k: int = 5) -> list[dict]
     return ranked[:top_k]
 
 
+def get_original_chunk(chunk_id: str) -> Optional[dict]:
+    """
+    Fetch one exact chunk by its chunk_id, no search involved. This is what
+    the Auditor uses to retrieve the EXACT control chunk the Mapper matched,
+    rather than searching again (which could theoretically return something
+    different). Returns None if no chunk with that id exists.
+    """
+    for chunk in _FAKE_CHUNKS:
+        if chunk["chunk_id"] == chunk_id:
+            return chunk
+    return None
+
+
 if __name__ == "__main__":
     import json
     print(json.dumps(search("multifactor authentication"), indent=2))

@@ -22,19 +22,39 @@ COPILOT_BACKEND=live
 COPILOT_QA_MODULE=qa_agent.agent:ask
 ```
 
-`ask(question)` returns the dashboard's contract:
-`{"answer": str, "citations": [search() results]}`. Citations are in the same
-order as the `[1]`, `[2]` markers in the answer.
+`ask(question, findings=None, history=None)` returns the dashboard's contract:
+`{"answer": str, "citations": [search() results], "suggestions": [...]}`.
+Citations are in the same order as the `[1]`, `[2]` markers in the answer.
 
-## Richer entry point
+Both extras are optional, so `ask(question)` still works:
 
-`answer(question, finding=None, history=None)` adds:
+- **findings:** the current review's findings (the dashboard's `Finding` objects
+  or plain gap-report dicts). Claude then sees each finding's ID, status,
+  coverage, recommendation and reviewer note, so a reviewer can ask things like
+  "suggest better recommendations for the 2 rejected findings". It fetches a
+  finding's policy and NIST text with `get_finding_evidence` when it needs them.
+- **history:** earlier chat messages as `{"role": "user"|"assistant", "content": str}`.
+  An assistant message's `citations` are listed with it, so follow-ups know
+  what earlier `[n]` markers referred to. Messages with `"error": True` are skipped.
 
-- **history:** earlier turns as `{"role": "user"|"assistant", "content": str}`
-- **finding:** a finding dict from the gap report. Its cited policy text and its
-  NIST control text are preloaded, and Claude can call `propose_recommendation`.
-  The result then includes `proposed_recommendation`, a suggestion only: the
-  dashboard should change the finding only if the reviewer accepts it.
+**suggestions** lists `{"finding_id", "recommendation"}` when Claude suggested new
+wording. The same suggestions appear in the answer text. They never change a
+finding: a reviewer decides whether to use them.
+
+From the dashboard (`app.py`):
+
+```python
+session = st.session_state.review_session
+backend.ask(question,
+            findings=session.findings if session else None,
+            history=st.session_state.chat[:-1])
+```
+
+## Finding-focused entry point
+
+`answer(question, finding=None, history=None, findings=None)` also takes one
+`finding` to focus on: its policy text and NIST control text are preloaded, and
+the result includes `proposed_recommendation` when Claude suggested new wording.
 
 ## Settings
 

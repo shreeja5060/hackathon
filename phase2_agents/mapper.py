@@ -9,13 +9,26 @@ in words and hoping.
 """
 
 import os
+import sys
 import json
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
-from fake_search import search
+
+# Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
+# dependencies are installed (Linux / Apple Silicon / Cloud Shell / Docker);
+# fall back to the placeholder fake_search on machines that can't run it
+# (e.g. Intel Macs). Same search() / get_original_chunk() interface either way.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_HERE)
+sys.path.append(os.path.join(_HERE, "..", "shared"))
+sys.path.append(os.path.join(_HERE, "..", "phase1_ingestion"))
+try:
+    from retriever import search, get_original_chunk
+    RETRIEVER_BACKEND = "real (phase1_ingestion/retriever.py)"
+except Exception:
+    from fake_search import search, get_original_chunk
+    RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -61,7 +74,7 @@ def map_requirement(requirement: dict) -> dict:
     matching NIST control using the framework chunks from search().
     """
     # Pull candidate NIST controls from our (placeholder) search function
-    candidates = search(requirement["requirement_text"], type="framework")
+    candidates = search(requirement["requirement_text"], type="framework", top_k=15)
     candidates_text = format_candidates(candidates)
     # Build a lookup so we can find the exact chunk_id for whichever
     # control_id Claude picks - this is what lets the Auditor fetch the

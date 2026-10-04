@@ -16,14 +16,21 @@ import os
 import sys
 import json
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(_THIS_DIR)
-sys.path.append(os.path.join(_THIS_DIR, "..", "shared"))
+# Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
+# dependencies are installed (Linux / Apple Silicon / Cloud Shell / Docker);
+# fall back to the placeholder fake_search on machines that can't run it
+# (e.g. Intel Macs). Same search() / get_original_chunk() interface either way.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_HERE)
+sys.path.append(os.path.join(_HERE, "..", "shared"))
+sys.path.append(os.path.join(_HERE, "..", "phase1_ingestion"))
+try:
+    from retriever import search, get_original_chunk
+    RETRIEVER_BACKEND = "real (phase1_ingestion/retriever.py)"
+except Exception:
+    from fake_search import search, get_original_chunk
+    RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
-# --- THE ONE LINE TO CHANGE ONCE MARYAM'S PR IS MERGED ---
-from fake_search import search
-# from retriever import search   # <- swap to this once real data is ready
-# -----------------------------------------------------------
 
 from extractor import extract_requirements
 from mapper import map_requirement
@@ -39,7 +46,8 @@ def run_full_pipeline() -> list[dict]:
     """
     # top_k set high so we get every policy chunk available, not just the
     # top few matches for one query
-    policy_chunks = search("", type="internal", top_k=100)
+    policy_chunks = search("security policy requirements users must", type="internal", top_k=200)
+    print(f"Retrieval backend: {RETRIEVER_BACKEND}")
     print(f"Found {len(policy_chunks)} policy chunk(s) to process.\n")
 
     full_gap_report = []

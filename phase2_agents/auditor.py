@@ -15,13 +15,26 @@ options the model can choose from, so you don't get "Mostly Full" or
 """
 
 import os
+import sys
 import json
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
-from fake_search import search, get_original_chunk
+
+# Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
+# dependencies are installed (Linux / Apple Silicon / Cloud Shell / Docker);
+# fall back to the placeholder fake_search on machines that can't run it
+# (e.g. Intel Macs). Same search() / get_original_chunk() interface either way.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_HERE)
+sys.path.append(os.path.join(_HERE, "..", "shared"))
+sys.path.append(os.path.join(_HERE, "..", "phase1_ingestion"))
+try:
+    from retriever import search, get_original_chunk
+    RETRIEVER_BACKEND = "real (phase1_ingestion/retriever.py)"
+except Exception:
+    from fake_search import search, get_original_chunk
+    RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -44,10 +57,17 @@ vague, or incomplete (e.g. "where required" without saying where)
 Then write a one-sentence finding explaining the classification, and if the \
 classification is not "Full", a one-sentence recommendation to fix the gap.
 
-Return ONLY JSON in this exact shape:
-{{"coverage": "Full|Partial|Missing|Not observable", "finding": "...", "recommendation": "..."}}
+Also write a PLAIN-LANGUAGE explanation suitable for someone new to \
+cybersecurity compliance - avoid jargon and control IDs, use a simple \
+analogy if it helps. And if you are not fully confident in this \
+classification, list 1-2 clarifying questions a human reviewer should \
+answer to judge this properly (e.g. "which systems count as privileged?"). \
+If you are confident, return an empty list for clarifying_questions.
 
-If coverage is "Full", set recommendation to "None".
+Return ONLY JSON in this exact shape:
+{{"coverage": "Full|Partial|Missing|Not observable", "finding": "...", "recommendation": "...", "plain_language": "...", "clarifying_questions": ["..."]}}
+
+If coverage is "Full", set recommendation to "None" and clarifying_questions to [].
 """
 
 
@@ -108,6 +128,8 @@ def audit_requirement(mapped_requirement: dict) -> dict:
         "coverage": result["coverage"],
         "finding": result["finding"],
         "recommendation": result["recommendation"],
+        "plain_language": result.get("plain_language", ""),
+        "clarifying_questions": result.get("clarifying_questions", []),
         "citation": {
             "chunk_id": mapped_requirement["chunk_id"],
             "source": mapped_requirement["source"],

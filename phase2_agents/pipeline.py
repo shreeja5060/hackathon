@@ -29,11 +29,21 @@ import sys
 # Explicitly add this script's own folder AND the shared folder to the
 # import path. This avoids relying on how Python happens to resolve the
 # "current directory" when the script is launched from somewhere else.
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(_THIS_DIR)
-sys.path.append(os.path.join(_THIS_DIR, "..", "shared"))
+# Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
+# dependencies are installed (Linux / Apple Silicon / Cloud Shell / Docker);
+# fall back to the placeholder fake_search on machines that can't run it
+# (e.g. Intel Macs). Same search() / get_original_chunk() interface either way.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_HERE)
+sys.path.append(os.path.join(_HERE, "..", "shared"))
+sys.path.append(os.path.join(_HERE, "..", "phase1_ingestion"))
+try:
+    from retriever import search, get_original_chunk
+    RETRIEVER_BACKEND = "real (phase1_ingestion/retriever.py)"
+except Exception:
+    from fake_search import search, get_original_chunk
+    RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
-from fake_search import search
 from extractor import extract_requirements
 from mapper import map_requirement
 from auditor import audit_requirement

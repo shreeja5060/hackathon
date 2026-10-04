@@ -16,13 +16,16 @@
 
 FROM python:3.12-slim
 
+# CHAT_MODEL: the deployed demo's chat runs on Sonnet (the local default is
+# Haiku). A Cloud Run environment variable with the same name overrides it.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/app/.cache/huggingface \
     PORT=8080 \
     COPILOT_BACKEND=live \
-    COPILOT_QA_MODULE=qa_agent.agent:ask
+    COPILOT_QA_MODULE=qa_agent.agent:ask \
+    CHAT_MODEL=claude-sonnet-5-5
 
 WORKDIR /app
 

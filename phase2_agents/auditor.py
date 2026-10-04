@@ -110,7 +110,7 @@ def audit_requirement(mapped_requirement: dict) -> dict:
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=300,
+        max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
 

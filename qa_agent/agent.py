@@ -58,7 +58,8 @@ under review, call propose_recommendation with one or two concrete, actionable s
 grounded in the policy text and the NIST control, then briefly explain the change in your \
 reply. The reviewer decides whether to apply it.
 
-Keep answers short and plain: a few sentences or a short list."""
+Keep answers short: a few plain sentences. Don't use Markdown formatting (no bold, \
+headings or bullet lists); the dashboard shows answers as plain text."""
 
 SEARCH_TOOL = {
     "name": "search_documents",
@@ -251,7 +252,14 @@ def answer(question: str, finding: dict | None = None, history: list[dict] | Non
 def ask(question: str) -> dict:
     """Dashboard Q&A contract: {"answer": str, "citations": [search() results]}."""
     result = answer(question)
-    return {"answer": result["answer"], "citations": result["citations"]}
+    return {"answer": _plain(result["answer"]), "citations": result["citations"]}
+
+
+def _plain(text: str) -> str:
+    """Drop leftover Markdown markers; the dashboard shows answers as one line of plain text."""
+    text = re.sub(r"(\*\*|__|`)", "", text)
+    text = re.sub(r"^\s*(#{1,6}\s+|[-*]\s+)", "", text, flags=re.M)
+    return re.sub(r"\s*\n\s*", " ", text).strip()
 
 
 def _log(question, finding, sources, result, usage, seconds) -> None:

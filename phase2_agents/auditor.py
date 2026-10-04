@@ -86,6 +86,12 @@ def audit_requirement(mapped_requirement: dict) -> dict:
             "coverage": "Not observable",
             "finding": "No matching framework control was found for this requirement in the current framework set.",
             "recommendation": "Review manually, or expand the framework coverage to include a relevant control.",
+            "plain_language": "We could not find a rule in the framework that this policy statement "
+                              "corresponds to, so we cannot judge it automatically. A person should "
+                              "check whether it matters and which rule, if any, applies.",
+            "clarifying_questions": [
+                "Which framework control, if any, should this requirement be checked against?"
+            ],
             "citation": {
                 "chunk_id": mapped_requirement["chunk_id"],
                 "source": mapped_requirement["source"],

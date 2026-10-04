@@ -165,7 +165,9 @@ def _run_search(args: dict, sources: _Sources) -> str:
     return "\n\n---\n\n".join(sources.render(h) for h in hits)
 
 
-_CITE = re.compile(r"\[(S\d+)\]")
+# One bracket can hold several references: [S1], [S1, S2], [S1; S2].
+_CITE_GROUP = re.compile(r"\[\s*(S\d+(?:\s*[,;]\s*S\d+)*)\s*\]")
+_REF = re.compile(r"S\d+")
 
 
 def _check_citations(text: str, sources: _Sources) -> tuple[str, list[dict], list[str]]:
@@ -173,12 +175,17 @@ def _check_citations(text: str, sources: _Sources) -> tuple[str, list[dict], lis
     Keep citations to retrieved passages, renumbered [1], [2], ... in order of
     first use; strip references that weren't retrieved and report them.
     """
+    refs = [ref for group in _CITE_GROUP.findall(text) for ref in _REF.findall(group)]
     used, rejected = [], []
-    for ref in dict.fromkeys(_CITE.findall(text)):
+    for ref in dict.fromkeys(refs):
         (used if ref in sources.by_ref else rejected).append(ref)
     number = {ref: i for i, ref in enumerate(used, start=1)}
 
-    text = _CITE.sub(lambda m: f"[{number[m.group(1)]}]" if m.group(1) in number else "", text)
+    def renumber(match):
+        kept = [f"[{number[ref]}]" for ref in _REF.findall(match.group(1)) if ref in number]
+        return "".join(dict.fromkeys(kept))
+
+    text = _CITE_GROUP.sub(renumber, text)
     text = re.sub(r"[ \t]+([.,;:])", r"\1", text)  # tidy spaces left by removed references
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text, [sources.by_ref[ref] for ref in used], rejected

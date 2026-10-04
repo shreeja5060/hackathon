@@ -8,17 +8,24 @@ answer is returned, citations are checked against what was retrieved: a
 reference that wasn't retrieved is removed, and the rest are renumbered [1],
 [2], ... in the order of the returned citations list.
 
-Two entry points:
-- ask(question) -> {"answer": str, "citations": [search() results]}
-  The dashboard's Q&A contract (COPILOT_QA_MODULE="qa_agent.agent:ask").
-- answer(question, finding=None, history=None) -> dict
-  Adds conversation history and finding-focused mode: the finding, its policy
-  text and its NIST control text are preloaded, and Claude can call
-  propose_recommendation. A proposal is only a suggestion for the reviewer.
+When the caller passes the review's findings, Claude sees a summary of each
+(ID, status, coverage, recommendation, reviewer note), can fetch one
+finding's policy and NIST text with get_finding_evidence, and can suggest new
+recommendation wording with propose_recommendation. Suggestions are returned
+separately and never change a finding: the reviewer decides.
+
+Entry points:
+- ask(question, findings=None, history=None)
+  The dashboard's Q&A contract (COPILOT_QA_MODULE="qa_agent.agent:ask"):
+  {"answer": str, "citations": [search() results], "suggestions": [...]}.
+  findings and history are optional, so ask(question) still works.
+- answer(question, finding=None, history=None, findings=None) -> dict
+  The same, plus finding-focused mode: one finding's evidence is preloaded.
 
 Every exchange is logged to data/processed/chat_log.sqlite3.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -35,28 +42,35 @@ load_dotenv(retrieval.REPO_ROOT / ".env")
 
 # Haiku while developing; set CHAT_MODEL (e.g. claude-sonnet-5-5) for the demo.
 MODEL = os.getenv("CHAT_MODEL", "claude-haiku-4-5")
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 6
 MAX_PASSAGE_CHARS = 2500
+MAX_FINDINGS_IN_CONTEXT = 80
+MAX_HISTORY_MESSAGES = 10
 LOG_DB = retrieval.PROCESSED / "chat_log.sqlite3"
 
 SYSTEM_PROMPT = """You are the Compliance Copilot assistant. You help a compliance reviewer \
 understand an organization's security policies, how they map to NIST SP 800-53 Rev. 5 and \
-NIST CSF 2.0, and any synthetic environment evidence (configurations, asset inventory).
+NIST CSF 2.0, and any synthetic environment evidence (configurations, asset inventory, \
+audit logs).
 
-Ground every factual statement in passages returned by the search_documents tool, or in \
-passages provided in the conversation. Cite them inline with their reference in square \
-brackets, e.g. [S2]. Only cite references you were actually given. If the documents don't \
-answer the question, say that the answer was not found in the documents rather than \
-answering from general knowledge.
+Ground every factual statement in passages returned by your tools, or in passages provided \
+in the conversation. Cite them inline with their reference in square brackets, e.g. [S2]. \
+Only cite references you were actually given. If the documents don't answer the question, \
+say that the answer was not found in the documents rather than answering from general \
+knowledge.
 
 Search before answering unless the provided passages already answer the question. Use \
 doc_type "internal" for the organization's policies, "framework" for NIST, and "evidence" \
-for configuration and inventory evidence.
+for configuration, inventory and log evidence.
 
-When the reviewer asks you to improve, rewrite or suggest a recommendation for the finding \
-under review, call propose_recommendation with one or two concrete, actionable sentences \
-grounded in the policy text and the NIST control, then briefly explain the change in your \
-reply. The reviewer decides whether to apply it.
+You may be given the findings in the reviewer's current gap-analysis review, with their IDs \
+and review status. Refer to findings by ID. Use get_finding_evidence to read a finding's \
+policy text and NIST control before judging or rewriting it.
+
+When the reviewer asks you to improve, rewrite or suggest a recommendation, call \
+propose_recommendation once per finding with one or two concrete, actionable sentences \
+grounded in that finding's policy text and NIST control. Also state each suggestion in your \
+reply, with its finding ID, and briefly say why. The reviewer decides whether to use it.
 
 Keep answers short: a few plain sentences. Don't use Markdown formatting (no bold, \
 headings or bullet lists); the dashboard shows answers as plain text."""
@@ -66,8 +80,9 @@ SEARCH_TOOL = {
     "description": (
         "Search the compliance knowledge base: the organization's security policies, "
         "NIST SP 800-53 Rev. 5 controls, NIST CSF 2.0 outcomes, and synthetic environment "
-        "evidence. Returns the most relevant passages, each with a reference to cite. "
-        "A bare control ID such as AC-2 or PR.AA-06 returns that exact control."
+        "evidence (configurations, inventory, audit logs). Returns the most relevant passages, "
+        "each with a reference to cite. A bare control ID such as AC-2 or PR.AA-06 returns "
+        "that exact control."
     ),
     "input_schema": {
         "type": "object",
@@ -76,7 +91,7 @@ SEARCH_TOOL = {
             "doc_type": {
                 "type": "string",
                 "enum": ["internal", "framework", "evidence", "any"],
-                "description": "internal = policies, framework = NIST, evidence = configs/inventory, any = all.",
+                "description": "internal = policies, framework = NIST, evidence = configs/inventory/logs, any = all.",
             },
         },
         "required": ["query", "doc_type"],
@@ -84,22 +99,44 @@ SEARCH_TOOL = {
     },
     "strict": True,
 }
-PROPOSE_TOOL = {
-    "name": "propose_recommendation",
-    "description": (
-        "Propose new wording for the recommendation of the finding under review. "
-        "Only use this when the reviewer asks for a better or different recommendation."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "recommendation": {"type": "string", "description": "The proposed recommendation text."},
+
+
+def _evidence_tool(ids: list[str]) -> dict:
+    return {
+        "name": "get_finding_evidence",
+        "description": (
+            "Get one finding's evidence: the policy text it cites and the text of its NIST "
+            "control, each with a reference to cite."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"finding_id": {"type": "string", "enum": ids}},
+            "required": ["finding_id"],
+            "additionalProperties": False,
         },
-        "required": ["recommendation"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
+        "strict": True,
+    }
+
+
+def _propose_tool(ids: list[str]) -> dict:
+    return {
+        "name": "propose_recommendation",
+        "description": (
+            "Suggest new wording for one finding's recommendation. Only use this when the "
+            "reviewer asks for a better or different recommendation. Call once per finding."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "enum": ids},
+                "recommendation": {"type": "string", "description": "The suggested recommendation text."},
+            },
+            "required": ["finding_id", "recommendation"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
 
 _client = None
 
@@ -129,14 +166,59 @@ class _Sources:
         return f"[{ref}] {where}\n{(chunk.get('text') or '')[:MAX_PASSAGE_CHARS]}"
 
 
-def _finding_context(finding: dict, sources: _Sources) -> str:
-    parts = [
-        "The reviewer is looking at this finding:",
-        json.dumps({k: finding.get(k) for k in
-                    ("requirement", "coverage", "finding", "recommendation", "framework_control",
-                     "plain_language", "clarifying_questions") if finding.get(k) is not None},
-                   indent=2),
-    ]
+# ---------------------------------------------------------------- findings
+
+def _as_dict(value) -> dict:
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _normalize_findings(findings) -> dict[str, dict]:
+    """
+    Accept the dashboard's Finding objects or plain gap-report dicts.
+    Returns {finding_id: finding dict} with the fields the agent uses.
+    """
+    out = {}
+    for position, raw in enumerate(findings or [], start=1):
+        f = _as_dict(raw)
+        if not f:
+            continue
+        extras = f.get("extras") or {}
+        edited = f.get("recommendation_edited")
+        fid = str(f.get("finding_id") or f.get("id") or f"F-{position}")
+        out[fid] = {
+            "id": fid,
+            "requirement": f.get("requirement"),
+            "requirement_text": f.get("requirement_text"),
+            "coverage": f.get("coverage"),
+            "finding": f.get("finding"),
+            "recommendation": edited if edited is not None else f.get("recommendation"),
+            "framework_control": f.get("framework_control"),
+            "status": f.get("status"),
+            "reviewer_note": f.get("reviewer_note") or None,
+            "plain_language": f.get("plain_language") or extras.get("plain_language"),
+            "clarifying_questions": f.get("clarifying_questions") or extras.get("clarifying_questions"),
+            "citation": _as_dict(f.get("citation")),
+            "cited_text": f.get("cited_text"),
+        }
+    return out
+
+
+def _review_summary(findings: dict[str, dict]) -> str:
+    rows = []
+    for f in list(findings.values())[:MAX_FINDINGS_IN_CONTEXT]:
+        row = {k: f[k] for k in ("id", "status", "requirement", "coverage", "finding",
+                                 "recommendation", "framework_control", "reviewer_note")
+               if f.get(k) not in (None, "")}
+        rows.append(json.dumps(row, ensure_ascii=False))
+    more = len(findings) - len(rows)
+    tail = f"\n({more} more findings not shown.)" if more > 0 else ""
+    return "Findings in the reviewer's current review (one per line):\n" + "\n".join(rows) + tail
+
+
+def _finding_evidence(finding: dict, sources: _Sources) -> str:
+    parts = []
     citation = finding.get("citation") or {}
     cid = citation.get("chunk_id")
     if cid:
@@ -151,7 +233,7 @@ def _finding_context(finding: dict, sources: _Sources) -> str:
         hits = retrieval.search(control, type="framework", top_k=1)
         if hits:
             parts.append("NIST control text:\n" + sources.render(hits[0]))
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) or "No evidence text is available for this finding."
 
 
 def _run_search(args: dict, sources: _Sources) -> str:
@@ -164,6 +246,8 @@ def _run_search(args: dict, sources: _Sources) -> str:
         return "No matching passages."
     return "\n\n---\n\n".join(sources.render(h) for h in hits)
 
+
+# --------------------------------------------------------------- citations
 
 # One bracket can hold several references: [S1], [S1, S2], [S1; S2].
 _CITE_GROUP = re.compile(r"\[\s*(S\d+(?:\s*[,;]\s*S\d+)*)\s*\]")
@@ -191,28 +275,51 @@ def _check_citations(text: str, sources: _Sources) -> tuple[str, list[dict], lis
     return text, [sources.by_ref[ref] for ref in used], rejected
 
 
-def answer(question: str, finding: dict | None = None, history: list[dict] | None = None) -> dict:
+# ------------------------------------------------------------------ agent
+
+def _history_messages(history) -> list[dict]:
+    """Earlier turns as API messages: text only, skipping error replies; starts with a user turn."""
+    messages = [{"role": m["role"], "content": str(m["content"])}
+                for m in (history or [])
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+                and m.get("content") and not m.get("error")][-MAX_HISTORY_MESSAGES:]
+    while messages and messages[0]["role"] != "user":
+        messages.pop(0)
+    return messages
+
+
+def answer(question: str, finding: dict | None = None, history: list[dict] | None = None,
+           findings=None) -> dict:
     """
-    Answer one question. history holds earlier turns as {"role", "content"}.
-    Returns {"answer", "citations" (search() results, in [1], [2] order),
-    "rejected_citations", and "proposed_recommendation" when one was proposed}.
+    Answer one question. Returns {"answer", "citations" (search() results, in
+    [1], [2] order), "rejected_citations", "suggestions" ([{"finding_id",
+    "recommendation"}]), and, in finding-focused mode, "proposed_recommendation"}.
     """
     started = time.time()
     sources = _Sources()
-    messages = [{"role": m["role"], "content": m["content"]}
-                for m in (history or []) if m.get("role") in ("user", "assistant") and m.get("content")]
+    review = _normalize_findings(findings)
+    focus = None
+    if finding is not None:
+        focus = next(iter(_normalize_findings([finding]).values()), None)
+        if focus:
+            review.setdefault(focus["id"], focus)
 
-    user_content = question
-    if finding:
-        user_content = _finding_context(finding, sources) + "\n\nReviewer's question: " + question
-    messages.append({"role": "user", "content": user_content})
+    context = []
+    if review:
+        context.append(_review_summary(review))
+    if focus:
+        context.append(f"The reviewer is asking about finding {focus['id']}. Its evidence:\n"
+                       + _finding_evidence(focus, sources))
+    user_content = "\n\n".join(context + [f"Reviewer's question: {question}"]) if context else question
+    messages = _history_messages(history) + [{"role": "user", "content": user_content}]
 
-    tools = [SEARCH_TOOL, PROPOSE_TOOL] if finding else [SEARCH_TOOL]
-    proposal, usage, text = None, {"input": 0, "output": 0}, ""
+    ids = list(review)
+    tools = [SEARCH_TOOL] + ([_evidence_tool(ids), _propose_tool(ids)] if ids else [])
+    suggestions, usage, text = {}, {"input": 0, "output": 0}, ""
     try:
         for _ in range(MAX_TOOL_ROUNDS + 1):
             response = _get_client().messages.create(
-                model=MODEL, max_tokens=2000, system=SYSTEM_PROMPT, tools=tools, messages=messages)
+                model=MODEL, max_tokens=3000, system=SYSTEM_PROMPT, tools=tools, messages=messages)
             usage["input"] += response.usage.input_tokens
             usage["output"] += response.usage.output_tokens
 
@@ -228,17 +335,22 @@ def answer(question: str, finding: dict | None = None, history: list[dict] | Non
             for block in response.content:
                 if block.type != "tool_use":
                     continue
+                args = block.input or {}
                 if block.name == "search_documents":
-                    content = _run_search(block.input, sources)
-                elif block.name == "propose_recommendation":
-                    proposal = (block.input.get("recommendation") or "").strip() or None
-                    content = "Proposal recorded. The reviewer will decide whether to apply it."
+                    content = _run_search(args, sources)
+                elif block.name == "get_finding_evidence" and args.get("finding_id") in review:
+                    content = _finding_evidence(review[args["finding_id"]], sources)
+                elif block.name == "propose_recommendation" and args.get("finding_id") in review:
+                    proposal = (args.get("recommendation") or "").strip()
+                    if proposal:
+                        suggestions[args["finding_id"]] = proposal
+                    content = "Suggestion recorded. The reviewer will decide whether to use it."
                 else:
-                    content = f"Unknown tool {block.name}."
+                    content = f"Unknown tool or finding: {block.name} {json.dumps(args)}"
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": content})
             messages.append({"role": "user", "content": results})
         else:
-            text = "I couldn't finish answering within the search limit. Try a more specific question."
+            text = "I couldn't finish answering within the tool limit. Try a more specific question."
     except anthropic.AuthenticationError:
         text = "The Q&A agent can't reach Claude: the Anthropic API key was rejected."
     except anthropic.RateLimitError:
@@ -249,17 +361,28 @@ def answer(question: str, finding: dict | None = None, history: list[dict] | Non
         text = "Couldn't connect to Claude. Check the internet connection."
 
     text, citations, rejected = _check_citations(text, sources)
-    result = {"answer": text.strip(), "citations": citations, "rejected_citations": rejected}
-    if proposal:
-        result["proposed_recommendation"] = proposal
-    _log(question, finding, sources, result, usage, time.time() - started)
+    result = {
+        "answer": text.strip(),
+        "citations": citations,
+        "rejected_citations": rejected,
+        "suggestions": [{"finding_id": k, "recommendation": v} for k, v in suggestions.items()],
+    }
+    if focus and focus["id"] in suggestions:
+        result["proposed_recommendation"] = suggestions[focus["id"]]
+    _log(question, focus, review, sources, result, usage, time.time() - started)
     return result
 
 
-def ask(question: str) -> dict:
-    """Dashboard Q&A contract: {"answer": str, "citations": [search() results]}."""
-    result = answer(question)
-    return {"answer": _plain(result["answer"]), "citations": result["citations"]}
+def ask(question: str, findings=None, history=None) -> dict:
+    """
+    Dashboard Q&A contract: {"answer": str, "citations": [search() results],
+    "suggestions": [{"finding_id", "recommendation"}]}. findings (the review's
+    Finding objects or dicts) and history (earlier {"role", "content"} chat
+    messages) are optional.
+    """
+    result = answer(question, history=history, findings=findings)
+    return {"answer": _plain(result["answer"]), "citations": result["citations"],
+            "suggestions": result["suggestions"]}
 
 
 def _plain(text: str) -> str:
@@ -269,7 +392,7 @@ def _plain(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text).strip()
 
 
-def _log(question, finding, sources, result, usage, seconds) -> None:
+def _log(question, focus, review, sources, result, usage, seconds) -> None:
     try:
         LOG_DB.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(LOG_DB) as db:
@@ -283,9 +406,11 @@ def _log(question, finding, sources, result, usage, seconds) -> None:
                 " rejected_refs, answer, proposed_recommendation, input_tokens, output_tokens, seconds)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (datetime.now(timezone.utc).isoformat(), MODEL,
-                 finding.get("requirement") if finding else None, question,
-                 json.dumps(list(sources.by_chunk)), json.dumps([c["chunk_id"] for c in result["citations"]]),
+                 focus["id"] if focus else (f"{len(review)} findings in context" if review else None),
+                 question, json.dumps(list(sources.by_chunk)),
+                 json.dumps([c["chunk_id"] for c in result["citations"]]),
                  json.dumps(result["rejected_citations"]), result["answer"],
-                 result.get("proposed_recommendation"), usage["input"], usage["output"], round(seconds, 2)))
+                 json.dumps(result["suggestions"]) if result["suggestions"] else None,
+                 usage["input"], usage["output"], round(seconds, 2)))
     except sqlite3.Error:
         pass  # logging must never break the chat

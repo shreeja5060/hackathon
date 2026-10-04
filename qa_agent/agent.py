@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -71,6 +72,11 @@ When the reviewer asks you to improve, rewrite or suggest a recommendation, call
 propose_recommendation once per finding with one or two concrete, actionable sentences \
 grounded in that finding's policy text and NIST control. Also state each suggestion in your \
 reply, with its finding ID, and briefly say why. The reviewer decides whether to use it.
+
+Earlier turns in the conversation show only their final text, not the tool calls behind \
+them. Their citations and any suggestions were already checked and recorded when they were \
+given, so don't second-guess or retract them. Their [n] markers refer to that turn's own \
+sources, not to the references in the current turn.
 
 Keep answers short: a few plain sentences. Don't use Markdown formatting (no bold, \
 headings or bullet lists); the dashboard shows answers as plain text."""
@@ -277,9 +283,20 @@ def _check_citations(text: str, sources: _Sources) -> tuple[str, list[dict], lis
 
 # ------------------------------------------------------------------ agent
 
+def _history_text(message: dict) -> str:
+    """An earlier turn's text; an assistant turn also lists the sources its [n] markers point to."""
+    text = str(message["content"])
+    if message["role"] == "assistant" and message.get("citations"):
+        listed = "; ".join(
+            f"[{i}] " + ", ".join(str(x) for x in (c.get("source"), c.get("locator")) if x)
+            for i, c in enumerate(message["citations"], start=1) if isinstance(c, dict))
+        text += f"\n(Sources this answer cited, already checked: {listed})"
+    return text
+
+
 def _history_messages(history) -> list[dict]:
     """Earlier turns as API messages: text only, skipping error replies; starts with a user turn."""
-    messages = [{"role": m["role"], "content": str(m["content"])}
+    messages = [{"role": m["role"], "content": _history_text(m)}
                 for m in (history or [])
                 if isinstance(m, dict) and m.get("role") in ("user", "assistant")
                 and m.get("content") and not m.get("error")][-MAX_HISTORY_MESSAGES:]
@@ -392,15 +409,25 @@ def _plain(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text).strip()
 
 
+_LOG_COLUMNS = {
+    "ts": "TEXT", "model": "TEXT", "finding": "TEXT", "question": "TEXT",
+    "retrieved_chunk_ids": "TEXT", "cited_chunk_ids": "TEXT", "rejected_refs": "TEXT",
+    "answer": "TEXT", "proposed_recommendation": "TEXT",
+    "input_tokens": "INTEGER", "output_tokens": "INTEGER", "seconds": "REAL",
+}
+
+
 def _log(question, focus, review, sources, result, usage, seconds) -> None:
     try:
         LOG_DB.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(LOG_DB) as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS chat_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, model TEXT, finding TEXT,
-                question TEXT, retrieved_chunk_ids TEXT, cited_chunk_ids TEXT,
-                rejected_refs TEXT, answer TEXT, proposed_recommendation TEXT,
-                input_tokens INTEGER, output_tokens INTEGER, seconds REAL)""")
+            db.execute("CREATE TABLE IF NOT EXISTS chat_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                       + ", ".join(f"{name} {kind}" for name, kind in _LOG_COLUMNS.items()) + ")")
+            # A log made by an older version may lack newer columns: add them.
+            existing = {row[1] for row in db.execute("PRAGMA table_info(chat_log)")}
+            for name, kind in _LOG_COLUMNS.items():
+                if name not in existing:
+                    db.execute(f"ALTER TABLE chat_log ADD COLUMN {name} {kind}")
             db.execute(
                 "INSERT INTO chat_log (ts, model, finding, question, retrieved_chunk_ids, cited_chunk_ids,"
                 " rejected_refs, answer, proposed_recommendation, input_tokens, output_tokens, seconds)"
@@ -412,5 +439,6 @@ def _log(question, focus, review, sources, result, usage, seconds) -> None:
                  json.dumps(result["rejected_citations"]), result["answer"],
                  json.dumps(result["suggestions"]) if result["suggestions"] else None,
                  usage["input"], usage["output"], round(seconds, 2)))
-    except sqlite3.Error:
-        pass  # logging must never break the chat
+    except sqlite3.Error as e:
+        # Logging must never break the chat, but a failure shouldn't go unnoticed.
+        print(f"[qa_agent] chat log not written ({LOG_DB}): {e}", file=sys.stderr)

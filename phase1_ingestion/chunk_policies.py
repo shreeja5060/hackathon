@@ -1,7 +1,8 @@
-"""Create section chunks from the three numbered public policy templates.
+"""Create policy chunks with numbered sections or a page-based fallback.
 
 Run after parse_pdfs.py. Uses only the Python standard library.
 Each chunk stays on one PDF page; continuing sections keep their locator.
+Unfamiliar layouts use page chunks when section splitting would omit text.
 The type/doc_kind split follows the approved Slack proposal. The policy role
 defaults to 'internal' and can be changed with --policy-type if the team
 chooses a different label. Search scores are computed later, during retrieval.
@@ -21,6 +22,14 @@ HEADING = re.compile(r"^(\d+(?:\.\d+)*)(?:\.)?\s+([A-Z].*)$")
 FOOTER = (
     "Public template | Organization-specific and security-sensitive details removed"
 )
+# Only these exact publication preambles from the three supplied templates
+# are metadata-only. Changed/new introductory text must remain in the chunks.
+# Values list the templates' empty parent headings, not policy requirements.
+TEMPLATE_PREAMBLES = {
+    "06e055d209b4076d83aa0851d34f4d36cae93f3dbeed7e3fffe2ce3b961df194": {"3 Policy requirements"},
+    "5c9e619ad62f23e7ef30a876269322f5eabf25d3f864cf6a8f5b98c959b20399": {"3 Security requirements"},
+    "2197846026c5619334761680cb33a1d241be5245e0506f465721f62faecafd4b": set(),
+}
 
 
 def clean_line(line):
@@ -49,13 +58,7 @@ def join_paragraphs(lines):
     return "\n\n".join(paragraphs)
 
 
-def make_chunk(source, page, heading, body, policy_type):
-    body_text = join_paragraphs(body)
-    if not body_text:
-        return None  # A parent heading alone is not a separate evidence chunk.
-
-    locator = f"Section {heading}"
-    text = f"{heading}\n\n{body_text}"
+def chunk_record(source, page, locator, text, policy_type):
     identity = json.dumps([source, page, locator, text], ensure_ascii=False)
     chunk_id = "policy-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return {
@@ -67,6 +70,24 @@ def make_chunk(source, page, heading, body, policy_type):
         "page": page,
         "locator": locator,
     }
+
+
+def make_chunk(source, page, heading, body, policy_type):
+    body_text = join_paragraphs(body)
+    if not body_text:
+        return None  # A parent heading alone is not a separate evidence chunk.
+    return chunk_record(
+        source, page, f"Section {heading}", f"{heading}\n\n{body_text}", policy_type
+    )
+
+
+def make_page_chunk(record, policy_type):
+    """Keep the extracted text and cite its actual page, without guessing a section."""
+    page = record["page"]
+    return chunk_record(
+        record["source"], page, f"Page {page}",
+        f"Page {page}\n\n{record['text'].strip()}", policy_type,
+    )
 
 
 def chunk_pages(pages, policy_type="internal"):
@@ -83,7 +104,15 @@ def chunk_pages(pages, policy_type="internal"):
         numbers = [record["page"] for record in source_pages]
         if numbers != list(range(1, len(source_pages) + 1)):
             raise ValueError(f"Missing or duplicate page numbers in {source}")
+        for record in source_pages:
+            if not isinstance(record["text"], str) or not record["text"].strip():
+                raise ValueError(
+                    f"No text found in {source}, page {record['page']}. "
+                    "Review the PDF; scanned pages may need OCR."
+                )
 
+        source_chunks = []
+        headings = []
         heading = None
         preamble = []
         for record in source_pages:
@@ -99,8 +128,9 @@ def chunk_pages(pages, policy_type="internal"):
                             source, record["page"], heading, body, policy_type
                         )
                         if chunk:
-                            chunks.append(chunk)
+                            source_chunks.append(chunk)
                     heading = f"{match.group(1)} {match.group(2)}"
+                    headings.append((match.group(1), heading))
                     body = []
                 elif heading is None:
                     preamble.append(line)
@@ -112,25 +142,46 @@ def chunk_pages(pages, policy_type="internal"):
                     source, record["page"], heading, body, policy_type
                 )
                 if chunk:
-                    chunks.append(chunk)
+                    source_chunks.append(chunk)
             # Keep heading for any continuation at the start of the next page.
 
-        if heading is None:
-            raise ValueError(f"No numbered sections found in {source}; review its layout.")
-
         context = join_paragraphs(preamble)
+        is_public_template = "Public release template" in context
+        context_hash = hashlib.sha256(context.encode("utf-8")).hexdigest()
+        known_preamble = context_hash in TEMPLATE_PREAMBLES
+        parent_headings = TEMPLATE_PREAMBLES.get(context_hash, set())
+        used_headings = {chunk["text"].split("\n", 1)[0] for chunk in source_chunks}
+        omitted_heading = any(
+            name not in used_headings
+            and not (
+                name in parent_headings
+                and any(other.startswith(number + ".") for other, _ in headings)
+            )
+            for number, name in headings
+        )
+        # The supplied public templates have a publication/owner preamble,
+        # retained in source_context. For other documents, introductory text
+        # may contain requirements and must be included in the chunks.
+        use_pages = (
+            not source_chunks
+            or omitted_heading
+            or (bool(context) and not known_preamble)
+            or {chunk["page"] for chunk in source_chunks} != set(numbers)
+        )
+        if use_pages:
+            source_chunks = [make_page_chunk(record, policy_type) for record in source_pages]
+        chunks.extend(source_chunks)
         sources[source] = {
             "page_count": len(source_pages),
             "version": None,
             "revision_date": None,
-            "is_public_template": (
-                True if "Public release template" in context else None
-            ),
+            "is_public_template": True if is_public_template else None,
             "source_context": context,
+            "chunking_strategy": "pages" if use_pages else "numbered_sections",
         }
 
     if not chunks:
-        raise ValueError("No section content found; review the extracted text.")
+        raise ValueError("No policy content found; review the extracted text.")
     return chunks, sources
 
 

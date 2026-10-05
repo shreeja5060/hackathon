@@ -64,7 +64,9 @@ JSON files after indexing: the full-entry lookup uses them.
 | `load_frameworks.py` | `data/processed/framework_chunks.json` and `framework_parse_report.json` |
 | `chunk_and_embed.py` | `data/processed/indexed_chunks.json`, Chroma collection, and `chroma_db/index_manifest.json` |
 
-Policy chunks follow sections and page boundaries. Framework entries retain
+Policy chunks follow numbered sections and page boundaries when that split
+keeps the document's text. Other layouts fall back to one chunk per page,
+with a `Page N` locator and the complete extracted page text. Framework entries retain
 control/outcome identifiers and distinguish requirements from explanatory
 discussion or implementation examples. Withdrawn framework entries are
 excluded, and unresolved organizational choices remain explicit placeholders.
@@ -80,6 +82,48 @@ Rerunning with the same inputs upserts the same IDs; changed inputs/settings
 select a different collection. The manifest switches to the completed
 collection after all records are stored and the count matches. Older
 collections remain on disk. Retrieval follows the active manifest.
+
+## Unfamiliar policy layouts
+
+The chunker accepts unnumbered headings, Roman headings and numbered lists
+of requirements using a page-based fallback. It also uses this fallback when
+introductory text would otherwise be left out, or a numbered heading contains
+text that section splitting would discard. It preserves the extracted text
+and actual page numbers instead of guessing section names.
+
+The three supplied templates keep their 28 section chunks and existing IDs.
+Only their unchanged publication preambles and empty parent headings remain
+metadata-only; the preambles are retained in `source_context`. New or modified
+introductions remain in the chunks. Source records include
+`chunking_strategy`, either `numbered_sections` or `pages`.
+
+Run the offline checks without changing processed files or the Chroma index:
+
+```bash
+python -m phase1_ingestion.check_policy_ingestion
+```
+
+The checks generate temporary synthetic PDFs, verify full fallback text and
+page citations, test blank/scanned-page and password-protected-file rejection,
+and check the original templates. They require PyMuPDF, but no embedding model
+or Claude API key. They do not measure agent or compliance accuracy.
+
+To inspect another policy PDF without adding it to the index:
+
+```bash
+python -m phase1_ingestion.check_policy_ingestion --pdf "/path/to/another_policy.pdf"
+```
+
+These inputs are treated as policies because they were selected as policies;
+document classification and OCR are not implemented. A page with no extracted
+text raises an error rather than producing a partial document. Review reading
+order manually for complex layouts such as columns and tables.
+
+Mahsa's live dashboard upload backend calls this same `chunk_pages()` function.
+Its existing `test_uploads_are_split_by_phase1s_chunker` test should now expect
+an unnumbered PDF to return a `Page 1` chunk, instead of expecting rejection.
+Uploaded files still need indexing before they are available to document search;
+this change does not add an upload-to-index step.
 
 ## Search interface
 
@@ -122,7 +166,7 @@ Every search result has exactly these eight fields:
 | `page` | One-based PDF page number, or `None` |
 | `type` | `internal`, `framework`, or `evidence` |
 | `doc_kind` | Descriptive string; currently `policy`, `control_catalog`, or `cybersecurity_framework` |
-| `locator` | Section heading/control identifier, or `None` |
+| `locator` | Section heading, fallback page label, control identifier, or `None` |
 | `score` | Cosine similarity to this query, from -1 to 1; higher is closer |
 
 `None` serializes as JSON `null`; `page` and `locator` are never omitted from

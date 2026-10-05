@@ -1,34 +1,34 @@
 """
-Phase 2: The full pipeline, connected with LangGraph.
+Phase 2: the full pipeline as a LangGraph graph, with a real human-review
+checkpoint, exposed as two functions the dashboard can call.
 
-This wraps extractor.py, mapper.py, and auditor.py (which you already built
-and tested separately) into ONE connected workflow: Extractor -> Mapper ->
-Auditor -> Human Review. Nothing about those three functions changes - we're
-just adding a conductor on top that passes data between them and pauses for
-a human at the end.
+    run = start_review(chunks)            # runs Extractor -> Mapper -> Auditor on a whole
+                                          # document, then PAUSES. Returns pending findings.
+    final = submit_decisions(run["run_id"], decisions)
+                                          # the human's approve/reject choices resume the
+                                          # paused run; returns the final findings.
 
-Key new ideas today:
-  - STATE: a shared dictionary that flows through every node, growing as it
-    goes (this chunk -> + extracted requirements -> + mappings -> + gap report)
-  - NODES: each node is just a Python function that takes the state in and
-    returns updates to it
-  - EDGES: the connections saying which node runs after which
-  - INTERRUPT: a special point where the graph PAUSES and waits for a human
-    decision before continuing - this is your required human-review step
+Why a graph instead of a loop? The review step is not a UI flag: the pipeline
+is genuinely suspended at `human_review` until a person decides. Nothing is
+final until `submit_decisions` is called. That is the human-oversight
+requirement implemented in the pipeline itself.
+
+State flows through four nodes:
+    extract -> map -> audit -> human_review -> END
+Each agent node isolates per-item failures (logged in state["errors"]) so one
+bad chunk never stops the document, same as run_full_pipeline.py.
 """
 
 import os
+import sys
 import json
-from typing import TypedDict
+import uuid
+from typing import TypedDict, Optional
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 
-import sys
-# Explicitly add this script's own folder AND the shared folder to the
-# import path. This avoids relying on how Python happens to resolve the
-# "current directory" when the script is launched from somewhere else.
 # Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
 # dependencies are installed (Linux / Apple Silicon / Cloud Shell / Docker);
 # fall back to the placeholder fake_search on machines that can't run it
@@ -50,97 +50,170 @@ from auditor import audit_requirement
 
 load_dotenv()
 
+VALID_DECISIONS = {"approved", "rejected"}
 
-# This TypedDict describes the SHAPE of our state - what data exists as it
-# flows through the graph. Every node can read from this and add to it.
+
 class PipelineState(TypedDict):
-    policy_chunk: dict          # the input: one chunk of policy text
-    requirements: list          # filled in by the Extractor node
-    mapped: list                 # filled in by the Mapper node
-    gap_report: list             # filled in by the Auditor node
-    approved_findings: list      # filled in after human review
+    chunks: list            # input: the document's policy chunks
+    requirements: list      # after extract
+    mapped: list            # after map
+    findings: list          # after audit (status = "pending")
+    final_findings: list    # after human review (status = approved/rejected)
+    errors: list            # per-item failures, never fatal
 
 
-def extractor_node(state: PipelineState) -> dict:
-    """LangGraph node = a function that reads state, does work, returns updates."""
-    print("\n[Extractor] Reading policy chunk...")
-    requirements = extract_requirements(state["policy_chunk"])
-    print(f"[Extractor] Found {len(requirements)} requirement(s)")
-    return {"requirements": requirements}
+def extract_node(state: PipelineState) -> dict:
+    requirements, errors = [], []
+    for chunk in state["chunks"]:
+        try:
+            requirements.extend(extract_requirements(chunk))
+        except Exception as e:
+            errors.append({"stage": "extractor", "chunk_id": chunk.get("chunk_id"), "error": str(e)})
+    return {"requirements": requirements, "errors": state.get("errors", []) + errors}
 
 
-def mapper_node(state: PipelineState) -> dict:
-    print("\n[Mapper] Matching requirements to NIST controls...")
-    mapped = [map_requirement(req) for req in state["requirements"]]
-    for m in mapped:
-        print(f"[Mapper]   {m['requirement']} -> {m['mapped_control']}")
-    return {"mapped": mapped}
+def map_node(state: PipelineState) -> dict:
+    mapped, errors = [], []
+    for req in state["requirements"]:
+        try:
+            mapped.append(map_requirement(req))
+        except Exception as e:
+            errors.append({"stage": "mapper", "requirement": req.get("requirement"), "error": str(e)})
+    return {"mapped": mapped, "errors": state.get("errors", []) + errors}
 
 
-def auditor_node(state: PipelineState) -> dict:
-    print("\n[Auditor] Classifying coverage and drafting recommendations...")
-    gap_report = [audit_requirement(req) for req in state["mapped"]]
-    for g in gap_report:
-        print(f"[Auditor]   {g['requirement']}: {g['coverage']}")
-    return {"gap_report": gap_report}
+def audit_node(state: PipelineState) -> dict:
+    findings, errors = [], []
+    for req in state["mapped"]:
+        try:
+            findings.append(audit_requirement(req))
+        except Exception as e:
+            errors.append({"stage": "auditor", "requirement": req.get("requirement"), "error": str(e)})
+    # give every finding a stable id the dashboard can refer back to
+    for i, f in enumerate(findings):
+        f["finding_id"] = f"F{i+1:03d}"
+    return {"findings": findings, "errors": state.get("errors", []) + errors}
 
 
 def human_review_node(state: PipelineState) -> dict:
     """
-    This is the required MVP step: the graph PAUSES here and hands control
-    back to a human. interrupt() stops execution and returns whatever we
-    pass it - the pending findings - so a person (or our dashboard, later)
-    can look at them before anything is marked final.
+    The checkpoint. interrupt() suspends the run and hands the pending
+    findings out. The run stays suspended until submit_decisions() resumes
+    it with the human's choices; only then are statuses set.
     """
-    print("\n[Human Review] Pausing for approval...")
-    decision = interrupt({
-        "message": "Please review these findings",
-        "findings": state["gap_report"]
+    decisions = interrupt({
+        "message": "Review these findings. Nothing is final until you decide.",
+        "findings": state["findings"],
     })
-    # Once a human responds (see how we resume below), `decision` holds
-    # whatever they sent back - here, which findings they approved.
-    return {"approved_findings": decision["approved"]}
+    # decisions: {finding_id: {"decision": "approved"|"rejected",
+    #                          "recommendation": optional edited text}}
+    final = []
+    for f in state["findings"]:
+        d = decisions.get(f["finding_id"], {})
+        decision = d.get("decision", "pending")
+        if decision not in VALID_DECISIONS:
+            decision = "pending"          # undecided items stay pending, not silently approved
+        out = dict(f)
+        out["status"] = decision
+        if d.get("recommendation"):
+            out["recommendation"] = d["recommendation"]
+            out["recommendation_edited_by_human"] = True
+        final.append(out)
+    return {"final_findings": final}
 
 
-# Build the graph: register each node, then wire the edges (the order
-# they run in).
-graph = StateGraph(PipelineState)
-graph.add_node("extractor", extractor_node)
-graph.add_node("mapper", mapper_node)
-graph.add_node("auditor", auditor_node)
-graph.add_node("human_review", human_review_node)
+def build_graph():
+    g = StateGraph(PipelineState)
+    g.add_node("extract", extract_node)
+    g.add_node("map", map_node)
+    g.add_node("audit", audit_node)
+    g.add_node("human_review", human_review_node)
+    g.set_entry_point("extract")
+    g.add_edge("extract", "map")
+    g.add_edge("map", "audit")
+    g.add_edge("audit", "human_review")
+    g.add_edge("human_review", END)
+    return g
 
-graph.set_entry_point("extractor")
-graph.add_edge("extractor", "mapper")
-graph.add_edge("mapper", "auditor")
-graph.add_edge("auditor", "human_review")
-graph.add_edge("human_review", END)
 
-# A checkpointer lets the graph remember where it paused, so it can resume
-# later - necessary for the interrupt to work.
-checkpointer = MemorySaver()
-app = graph.compile(checkpointer=checkpointer)
+# One checkpointer for the process: it remembers every paused run by run_id.
+# (In-memory is fine for a single Streamlit process; swap for SqliteSaver if
+# the app ever needs to survive a restart mid-review.)
+_checkpointer = MemorySaver()
+app = build_graph().compile(checkpointer=_checkpointer)
+
+
+# ---------------------------------------------------------------------------
+# The two functions the dashboard calls
+# ---------------------------------------------------------------------------
+
+def start_review(chunks: list[dict], run_id: Optional[str] = None) -> dict:
+    """
+    Run a document's chunks through Extractor -> Mapper -> Auditor and pause
+    for human review. Returns the pending findings and the run_id needed to
+    resume. Nothing is approved yet.
+    """
+    run_id = run_id or str(uuid.uuid4())
+    config = {"configurable": {"thread_id": run_id}}
+    result = app.invoke({"chunks": chunks, "requirements": [], "mapped": [],
+                         "findings": [], "final_findings": [], "errors": []},
+                        config=config)
+    paused = result.get("__interrupt__")
+    findings = paused[0].value["findings"] if paused else result.get("findings", [])
+    return {
+        "run_id": run_id,
+        "status": "awaiting_human_review" if paused else "complete",
+        "findings": findings,
+        "errors": result.get("errors", []),
+        "backend": RETRIEVER_BACKEND,
+    }
+
+
+def submit_decisions(run_id: str, decisions: dict) -> dict:
+    """
+    Resume a paused run with the human's decisions and return the final
+    findings. `decisions` maps finding_id -> {"decision": "approved"|"rejected",
+    "recommendation": optional edited text}.
+    """
+    config = {"configurable": {"thread_id": run_id}}
+    result = app.invoke(Command(resume=decisions), config=config)
+    final = result.get("final_findings", [])
+    return {
+        "run_id": run_id,
+        "status": "complete",
+        "findings": final,
+        "approved": [f for f in final if f["status"] == "approved"],
+        "rejected": [f for f in final if f["status"] == "rejected"],
+        "pending": [f for f in final if f["status"] == "pending"],
+        "errors": result.get("errors", []),
+    }
+
+
+def get_pending(run_id: str) -> Optional[dict]:
+    """Look up a paused run's pending findings (e.g. after a page refresh)."""
+    config = {"configurable": {"thread_id": run_id}}
+    state = app.get_state(config)
+    if not state or not state.tasks:
+        return None
+    for task in state.tasks:
+        if task.interrupts:
+            return task.interrupts[0].value
+    return None
 
 
 if __name__ == "__main__":
-    # Grab one real policy chunk to run through the whole pipeline
-    chunk = search("authentication", type="internal")[0]
+    # Demo: one chunk, pause, then simulate a human approving the first finding
+    # and rejecting the rest.
+    print(f"Retrieval backend: {RETRIEVER_BACKEND}")
+    chunks = search("authentication", type="internal", top_k=1)
+    run = start_review(chunks)
+    print(f"\nPaused ({run['status']}), {len(run['findings'])} finding(s) awaiting review:")
+    for f in run["findings"]:
+        print(f"  {f['finding_id']}  {f['requirement']}: {f['coverage']}")
 
-    config = {"configurable": {"thread_id": "demo-run-1"}}
-
-    # First run: goes Extractor -> Mapper -> Auditor -> then PAUSES at
-    # human_review and returns control to us here.
-    result = app.invoke({"policy_chunk": chunk}, config=config)
-    print("\n--- Paused for human review ---")
-    print(json.dumps(result, indent=2, default=str))
-
-    # Simulate a human approving every finding (in the real dashboard, this
-    # comes from someone clicking "approve" on each row).
-    print("\n[Simulating human approval of all findings...]")
-    final_result = app.invoke(
-        Command(resume={"approved": result["__interrupt__"][0].value["findings"]}),
-        config=config
-    )
-
-    print("\n--- Final result after human approval ---")
-    print(json.dumps(final_result["approved_findings"], indent=2))
+    decisions = {f["finding_id"]: {"decision": "approved" if i == 0 else "rejected"}
+                 for i, f in enumerate(run["findings"])}
+    final = submit_decisions(run["run_id"], decisions)
+    print(f"\nResumed. approved={len(final['approved'])} rejected={len(final['rejected'])} "
+          f"pending={len(final['pending'])}")
+    print(json.dumps(final["approved"], indent=2)[:800])

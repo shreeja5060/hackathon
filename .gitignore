@@ -32,3 +32,4 @@ build/
 
 # Generated Phase 1 data
 /data/frameworks/
+venv312/

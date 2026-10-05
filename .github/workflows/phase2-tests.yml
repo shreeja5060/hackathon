@@ -21,7 +21,7 @@ jobs:
 
       # Only what the tests need. Phase 1's heavy deps (torch, chromadb) are
       # not required: the agents fall back to shared/fake_search.py.
-      - run: pip install anthropic python-dotenv pytest
+      - run: pip install anthropic python-dotenv pytest langgraph
 
       - run: pytest tests/ -v
         env:

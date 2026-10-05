@@ -1,11 +1,11 @@
 # Compliance Copilot 🛡️
 
 An AI-powered agent that reads internal security policy documents, compares them
-against official frameworks (starting with NIST), and produces a gap report —
-what's covered, what's partial, what's missing — with citations and a
+against official frameworks (starting with NIST), and produces a gap report
+what's covered, what's partial, what's missing  with citations and a
 human-in-the-loop approval step before anything is finalized.
 
-Built for the UpTempo AI Hackathon 2026 — Use Case 2 (Cybersecurity Governance &
+Built for the UpTempo AI Hackathon 2026 - Use Case 2 (Cybersecurity Governance &
 Compliance Intelligence).
 
 ## The problem

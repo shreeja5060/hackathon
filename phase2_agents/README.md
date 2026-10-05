@@ -16,6 +16,28 @@ LangGraph pipeline with a human-approval checkpoint.
 policy chunk through all three agents with per-stage error isolation and
 writes `full_gap_report.json`.
 
+## Dashboard integration (human-approval checkpoint)
+
+`pipeline.py` exposes the review step as two calls, so the dashboard's
+Approve/Reject buttons drive a genuinely suspended pipeline rather than
+editing a JSON field:
+
+```python
+from phase2_agents.pipeline import start_review, submit_decisions
+
+run = start_review(chunks)              # Extractor -> Mapper -> Auditor, then PAUSES
+run["findings"]                         # pending findings, each with a finding_id
+final = submit_decisions(run["run_id"], {
+    "F001": {"decision": "approved"},
+    "F002": {"decision": "rejected"},
+    "F003": {"decision": "approved", "recommendation": "edited text"},
+})
+final["approved"], final["rejected"], final["pending"]
+```
+
+Undecided findings stay `pending`; nothing is marked approved by default.
+`get_pending(run_id)` returns a paused run's findings (e.g. after a page refresh).
+
 ## Finding format
 
 Every finding has the same shape (this is the contract the dashboard reads):

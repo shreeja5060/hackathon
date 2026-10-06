@@ -25,8 +25,8 @@ from .conftest import make_pdf
 CHUNK_KEYS = {"chunk_id", "text", "source", "type", "doc_kind", "page", "locator"}  # chunk_policies.make_chunk
 EXTRACTOR_KEYS = {"requirement", "requirement_text", "source", "chunk_id", "locator"}  # extractor.py
 MAPPER_KEYS = EXTRACTOR_KEYS | {"mapped_control", "mapping_reasoning"}  # mapper.py
-AUDITOR_KEYS = {"requirement", "coverage", "finding", "recommendation", "citation",
-                "framework_control", "status"}  # auditor.py
+AUDITOR_KEYS = {"requirement", "coverage", "finding", "recommendation", "plain_language",
+                "clarifying_questions", "citation", "framework_control", "status"}  # auditor.py
 CITATION_KEYS = {"chunk_id", "source", "locator"}
 
 
@@ -64,8 +64,10 @@ def test_agent_outputs_have_the_phase2_shapes(sim_backend):
             assert set(entry["citation"]) == CITATION_KEYS
             assert entry["coverage"] in COVERAGE_VALUES
             assert entry["status"] == "pending"
+            assert isinstance(entry["plain_language"], str) and entry["plain_language"]
             if entry["coverage"] == "Full":
                 assert entry["recommendation"] == "None"  # auditor.py's convention
+                assert entry["clarifying_questions"] == []
 
 
 def test_mapper_agrees_with_the_extractor_topic(sim_backend):
@@ -86,30 +88,38 @@ def test_samples_cover_every_coverage_value(sim_backend):
     assert set(seen) == set(COVERAGE_VALUES)
 
 
-def test_pipeline_pauses_then_resumes_like_langgraph(sim_backend):
-    chunk = sim_backend.load_policy(sim_backend.list_policies()[0]).chunks[5]
+def test_pipeline_pauses_then_resumes_like_pipeline_py(sim_backend):
+    chunks = sim_backend.load_policy(sim_backend.list_policies()[0]).chunks[3:6]
     pipeline = SimulatedPipeline()
     config = {"configurable": {"thread_id": "t-1"}}
-    state = pipeline.invoke({"policy_chunk": chunk}, config)
-    assert {"policy_chunk", "requirements", "mapped", "gap_report", "__interrupt__"} <= set(state)
+    empty = {k: [] for k in ("requirements", "mapped", "findings", "final_findings", "errors")}
+    state = pipeline.invoke({"chunks": chunks, **empty}, config)
+    assert {"chunks", "requirements", "mapped", "findings", "final_findings", "errors", "__interrupt__"} <= set(state)
     pause = state["__interrupt__"][0].value
-    assert pause["message"] == "Please review these findings"
-    assert pause["findings"] == state["gap_report"]
+    assert pause["message"] == "Review these findings. Nothing is final until you decide."
+    ids = [f["finding_id"] for f in pause["findings"]]
+    assert ids == [f"F{n:03d}" for n in range(1, len(ids) + 1)] and len(ids) >= 3
 
-    final = pipeline.invoke(SimulatedCommand(resume={"approved": pause["findings"][:1]}), config)
-    assert final["approved_findings"] == pause["findings"][:1]
-    assert "__interrupt__" not in final
+    final = pipeline.invoke(SimulatedCommand(resume={
+        "F001": {"decision": "approved", "recommendation": "Edited."},
+        "F002": {"decision": "rejected"},
+        "F003": {"decision": "maybe"},  # not a valid decision: stays pending, like pipeline.py
+    }), config)["final_findings"]
+    assert [f["status"] for f in final[:3]] == ["approved", "rejected", "pending"]
+    assert final[0]["recommendation"] == "Edited." and final[0]["recommendation_edited_by_human"] is True
+    assert all(f["status"] == "pending" for f in final[3:])  # undecided stays pending
     with pytest.raises(RuntimeError):
-        pipeline.invoke(SimulatedCommand(resume={"approved": []}), config)  # already resumed
+        pipeline.invoke(SimulatedCommand(resume={}), config)  # already resumed
 
 
 def test_a_failing_section_is_reported_and_the_rest_still_run(sim_backend):
     sim_backend.set_failing_section(1)
     document = sim_backend.load_policy(sim_backend.list_policies()[0])
     session = analysis.analyze_policy(sim_backend, document, [c["chunk_id"] for c in document.chunks])
-    assert len(session.run.section_errors) == 1
-    assert "JSONDecodeError" in session.run.section_errors[0].error
-    assert len(session.run.ok_threads) == len(document.chunks) - 1
+    [failed] = session.run.section_errors
+    assert failed.error.startswith("Extractor failed: Expecting value")
+    assert failed.paused  # pipeline.py records the error and still pauses
+    assert len(session.run.ok_threads) == len(document.chunks)
 
 
 def test_search_matches_the_retriever_contract(sim_backend):

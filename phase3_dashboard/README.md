@@ -7,18 +7,19 @@ the Extractor, Mapper and Auditor, decide on every finding, and export a gap
 report that contains only the findings a named reviewer approved. It also has
 a chat page for questions about the policies and NIST controls.
 
-It runs today on a **simulator** that produces exactly what Phase 1 and
-Phase 2 produce, so it doesn't wait on the other branches. After the merge,
-one setting switches it to the **live** pipeline.
+It runs in two modes. **Live** uses the real Phase 1 and Phase 2 code on
+main: Shreeja's agents and LangGraph pipeline, Maryam's chunker and index, and
+Anu's Q&A agent once it's merged. **Simulator** produces the same data format
+from local rules, with no API key, for demos and offline work.
 
 ## Run it
 
-From the repo root:
+Python 3.12 (Phase 1 needs it), from the repo root:
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r phase3_dashboard/requirements.txt
+pip install -r requirements.txt    # the team's root file covers every phase
 
 cd phase3_dashboard
 streamlit run app.py
@@ -27,31 +28,15 @@ streamlit run app.py
 Then:
 
 1. Type your name in the sidebar. Decisions are logged under it.
-2. On **Analyze policy**, pick **Choose a loaded policy** (or upload a PDF), then **Run analysis**.
-3. On **Review findings**, approve, edit or reject each finding.
-4. Select **Finalize review**, then download the report from **Export report**.
+2. Pick **Simulator** or **Live pipeline** in the sidebar (see below for Live).
+3. On **Analyze policy**, upload a PDF or choose a loaded policy, then **Run analysis**.
+4. On **Review findings**, approve, edit or reject each finding.
+5. Select **Finalize review**, then download the report from **Export report**.
 
-The three sample policies cover every state: all four coverage values, an
-unmapped requirement, sections with no requirements, and one section with
-prompt-injection text. The sidebar's **Simulate a failing section** switch
-shows how a bad model reply is handled.
-
-### PyCharm
-
-Run → Edit Configurations → **+** → Python. Switch "script" to **module** and
-enter `streamlit`. Set the parameters to `run app.py` and the working directory
-to `<repo>/phase3_dashboard`.
-
-### Tests
-
-```bash
-python -m pytest phase3_dashboard/tests -q      # from the repo root
-```
-
-There are 66 tests. They include a headless run of the whole app and, once
-Phase 2 is merged, a round trip through the real LangGraph runtime with
-`phase2_agents/pipeline.py` (the agents are swapped for stand-ins, so no
-API calls). Before the merge those live tests are skipped.
+In the simulator, the three sample policies cover every state: all four
+coverage values, an unmapped requirement, sections with no requirements, and
+one section with prompt-injection text. **Simulate a failing section** shows
+how a bad model reply is handled.
 
 ## How it's organized
 
@@ -65,17 +50,16 @@ core/
   security.py        upload checks, safe rendering, prompt-injection warning
 backends/
   simulated.py       fake Phase 1 + 2, in the same formats
-  live.py            the real Phase 1 + 2 code, after the merge
+  live.py            the real Phase 1 + 2 code (start_review / submit_decisions)
   sample_data.py     invented sample policies and simulated control summaries
 ui/components.py     badges, finding cards, table, chat messages
-tests/               66 tests
+tests/               73 tests, including live end-to-end runs
 .streamlit/          theme and server settings
 ```
 
-The UI only talks to a backend through one interface. Both backends drive
-their graph the same way and feed the same validation code
-(`contracts.normalize_pipeline_state`). Going live changes where the data
-comes from, not how it's checked or shown.
+The UI only talks to a backend through one interface, and both backends feed
+the same validation code (`contracts.normalize_pipeline_state`). Switching
+modes changes where the data comes from, not how it's checked or shown.
 
 ## What the simulator mirrors
 
@@ -85,26 +69,29 @@ comes from, not how it's checked or shown.
 | `search()` | `phase1_ingestion/retriever.py` | 8 result fields, argument checks (rejects `type="policy"` too) |
 | Extractor | `phase2_agents/extractor.py` | `requirement`, `requirement_text`, `source`, `chunk_id`, `locator` |
 | Mapper | `phase2_agents/mapper.py` | adds `mapped_control`, `mapping_reasoning` to the same dicts |
-| Auditor | `phase2_agents/auditor.py` | the gap-report entry, `status: "pending"`, `"None"` when Full |
-| Graph | `phase2_agents/pipeline.py` | pauses at human review; resumes with `{"approved": [...]}` |
+| Auditor | `phase2_agents/auditor.py` | the gap-report entry with `plain_language` and `clarifying_questions`; its exact no-control entry |
+| Graph | `phase2_agents/pipeline.py` | `F001`-style IDs; failures in `errors`; pauses at review; resumes with `{finding_id: {"decision"}}` |
 
 Keyword rules stand in for Claude's judgment, so simulated findings are
 plausible but aren't real results. The simulated NIST texts are short
 paraphrases, labeled as such. Every simulated report says so at the top.
 
-## Switching to the live pipeline
+## Running the live pipeline
 
-1. Merge `phase1-maryam` and `phase2-shreeja` into your branch.
-2. `pip install -r requirements.txt` (the root one), and put `ANTHROPIC_API_KEY` in `.env`.
-   Make sure the root `.gitignore` lists `.env`.
-3. Run Phase 1's build scripts (see its README) so `data/processed/policy_chunks.json`
-   and `chroma_db/` exist.
-4. Start the app and choose **Live pipeline** in the sidebar, or start it with
-   `COPILOT_BACKEND=live`.
+1. Use Python 3.12 and `pip install -r requirements.txt` from the repo root.
+2. Put `ANTHROPIC_API_KEY` in `.env` (`cp .env.example .env`). The root `.gitignore` already ignores it.
+3. Build Phase 1's index (see `phase1_ingestion/README.md`) so `data/processed/policy_chunks.json`
+   and `chroma_db/` exist. Without it, "Choose a loaded policy" is empty; uploads still work.
+4. Start the app and choose **Live pipeline** in the sidebar, or start it with `COPILOT_BACKEND=live`.
+
+The sidebar shows which retriever Phase 2 is really using. `pipeline.py`
+quietly falls back to `shared/fake_search.py` when Phase 1's retriever can't
+load (for example on Intel Macs, which have no `torch` builds). The dashboard
+warns about it, so placeholder matches are never mistaken for real ones.
 
 If something is missing, the sidebar says what. It never falls back to
 simulated data while claiming to be live. Live mode calls Claude for every
-section, so analyze a few sections first.
+requirement, so analyze a few sections first.
 
 ### Settings
 
@@ -112,38 +99,50 @@ section, so analyze a few sections first.
 | --- | --- | --- |
 | `COPILOT_BACKEND` | `simulated` | `simulated` or `live` at startup |
 | `COPILOT_SIM_DELAY` | `0.3` | Seconds per section in the simulator |
-| `COPILOT_QA_MODULE` | none | Anu's Q&A agent as `module:function`. Without it, live chat shows search results only |
-| `ANTHROPIC_API_KEY` | none | Used by the Phase 2 agents, never by the dashboard itself |
+| `COPILOT_QA_MODULE` | `qa_agent.agent:ask` if present | Which Q&A function the chat uses. Without one, live chat shows search results only |
+| `ANTHROPIC_API_KEY` | none | Used by the Phase 2 agents and the Q&A agent, never by the dashboard itself |
 
 ## The contract with Phase 2
 
-**In.** `pipeline.py` pauses with `interrupt({"message": ..., "findings": gap_report})`.
-Each finding is what `auditor.py` returns:
+The dashboard calls `pipeline.py`'s review API, once per section:
+
+```python
+run = start_review([chunk], run_id=thread_id)   # Extractor -> Mapper -> Auditor, then pauses
+submit_decisions(thread_id, {"F001": {"decision": "approved", "recommendation": "edited text"},
+                             "F002": {"decision": "rejected"}})
+```
+
+**In.** Each finding is what the Auditor returns plus the `finding_id` the
+pipeline adds:
 
 ```json
 {
-  "requirement": "No credential sharing",
+  "finding_id": "F001",
+  "requirement": "MFA for privileged accounts",
   "coverage": "Partial",
   "finding": "…",
   "recommendation": "…",
-  "citation": {"chunk_id": "policy-…", "source": "Computer Security Policy.pdf", "locator": "Section 3.5 …"},
-  "framework_control": "IA-5",
+  "plain_language": "The rule says MFA is needed but not where.",
+  "clarifying_questions": ["Which systems count as privileged?"],
+  "citation": {"chunk_id": "policy-…", "source": "…", "locator": "Section 3.3 …"},
+  "framework_control": "IA-2",
   "status": "pending"
 }
 ```
 
-The dashboard also recovers `requirement_text` and `mapping_reasoning` from
-the mapper output in the same state, and the page from the analyzed chunk.
-Extra fields the agents add later (an ambiguity note, say) show up under
-**Evidence → Other fields** without code changes.
+The dashboard also recovers `requirement_text` and `mapping_reasoning` from the
+paused run's mapper output, and the page from the analyzed chunk. Per-item
+failures in the run's `errors` list are shown on the Review page and in the
+report. Fields the agents add later show up under **Evidence → Other fields**.
 
-**Out.** On finalize, each paused thread is resumed with
-`Command(resume={"approved": [...]})`: its approved findings in the auditor's
-format, plus `reviewer`, `reviewed_at`, `reviewer_note`, and, when the reviewer
-edited the text, `recommendation_ai_original`.
+**Out.** On finalize, every decision goes back, rejections included, with the
+reviewer's edited recommendation when there is one. The dashboard then checks
+that the pipeline recorded exactly those decisions. Runs whose sections had no
+findings are closed with an empty decision set. Reviewer names, notes and
+timestamps stay in the dashboard's audit trail and the exported report.
 
-`pipeline.py` analyzes one chunk per run, so the dashboard runs one LangGraph
-thread per section and resumes each with its own approved findings.
+One run per section means progress shows section by section, and one bad
+section can't hold up the rest.
 
 ## Human review and safety rules
 
@@ -160,16 +159,18 @@ These are enforced in `core/`, not just in the UI.
 - CSV cells that would run as spreadsheet formulas are neutralized.
 - The browser shows only error types; details go to the terminal.
 
-## Notes for Phase 2
+## Notes for the team
 
-Found while matching the dashboard to the current agent code:
+Fixed on main since the first version of this list: the `type="policy"`
+calls, the Auditor re-searching controls (it now uses `get_original_chunk`),
+the crash on a null mapping, the missing finding IDs, and whole-document runs.
+Still open:
 
-1. `extractor.py` and `pipeline.py` call `search(..., type="policy")`. The real retriever only accepts `internal`, `framework` or `evidence`, so these raise errors after the swap.
-2. `auditor.py` looks the control up again with `search(control_id)` and takes the top hit. Phase 1's README warns this can return a different control. Keep the Mapper's chosen `chunk_id` and use `get_original_chunk()`.
-3. When the Mapper returns `null`, the auditor calls `search(None)`, which raises with the real retriever. Return "Not observable" directly instead.
-4. The auditor's output drops `requirement_text`, `page` and `mapping_reasoning`, and has no finding ID. The dashboard works around this, but adding them upstream is simpler.
-5. Gaps are found only for requirements the policy states. A control the policy never mentions can't come out as "Missing." A pass over a chosen baseline of controls would catch those.
-6. `type="framework"` searches cover NIST CSF 2.0 as well as SP 800-53, so the Mapper may return CSF outcomes. A framework filter would also let the dashboard's framework selector drive the choice.
+1. **Requirement-driven gaps only.** A control the policy never mentions can't come out as "Missing." A pass over a chosen baseline of controls would catch those.
+2. **Two frameworks in one search.** `type="framework"` covers NIST CSF 2.0 as well as SP 800-53, so the Mapper may pick CSF outcomes. A framework filter would let the dashboard's framework selector drive it.
+3. **Silent placeholder search.** `pipeline.py` falls back to `fake_search` without failing. The dashboard warns, but a demo machine should have the real index.
+4. **Reviewer details.** `submit_decisions()` records approve/reject and edits, but not who decided or why. The dashboard keeps that in its audit trail; the pipeline could store it too.
+5. **Two dashboards.** `phase3-anu` has its own `phase3_dashboard/app.py`, which would conflict with this one in main. Anu's Q&A agent (`chat-anu`) already plugs into this dashboard's chat once merged.
 
 ## Adding features
 
@@ -177,7 +178,7 @@ Found while matching the dashboard to the current agent code:
 - **A new table column or card detail:** `ui/components.py`.
 - **A new report section:** `core/report.py` (Markdown, JSON and CSV builders).
 - **A new field from the agents:** shows automatically under Other fields. To give it a proper place, add it to `Finding` in `core/contracts.py`.
-- **Theme:** `.streamlit/config.toml`.
+- **Theme and upload limits:** `.streamlit/config.toml`.
 
 ## Deploying later
 

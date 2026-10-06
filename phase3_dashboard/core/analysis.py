@@ -1,9 +1,10 @@
 """Runs a policy through the agent pipeline and hands the result to review.
 
-pipeline.py analyzes one policy chunk per run and pauses at human_review.
-So the dashboard starts one LangGraph thread per section, collects every
-paused thread's findings into a single review, and, when the reviewer
-finalizes, resumes each thread with its own approved findings.
+phase2_agents/pipeline.py exposes start_review(chunks) and
+submit_decisions(run_id, decisions). The dashboard starts one paused run per
+section, so it can show progress section by section and one bad section
+can't hold up the rest. All paused runs are collected into one review. When
+the reviewer finalizes, each run is resumed with its own decisions.
 """
 
 from __future__ import annotations
@@ -13,8 +14,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
-from .contracts import AnalysisRun, ContractError, SectionResult, normalize_pipeline_state
-from .review import ReviewError, ReviewSession, can_finalize, mark_finalized, resume_payloads, utc_now
+from .contracts import (
+    AnalysisRun,
+    ContractError,
+    SectionResult,
+    format_pipeline_errors,
+    normalize_pipeline_state,
+)
+from .review import ReviewError, ReviewSession, can_finalize, decisions_by_thread, mark_finalized, utc_now
 
 if TYPE_CHECKING:
     from ..backends.base import ComplianceBackend, PolicyDocument
@@ -34,6 +41,32 @@ def describe_error(exc: BaseException) -> str:
     if len(message) > 300:
         message = message[:300] + "…"
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _analyze_section(backend, chunk, thread_id, label) -> tuple[SectionResult, list]:
+    base = {"thread_id": thread_id, "chunk_id": chunk["chunk_id"], "label": label, "page": chunk.get("page")}
+    try:
+        state = backend.run_section(chunk, thread_id)
+    except Exception as exc:  # noqa: BLE001 - one failed section must not sink the whole run
+        log.exception("Analysis failed for %s", label)
+        return SectionResult(**base, status="error", error=describe_error(exc)), []
+
+    warnings = format_pipeline_errors(state)
+    retrieval = state.get("retrieval_backend") if isinstance(state, dict) else None
+    try:
+        findings = normalize_pipeline_state(state, thread_id=thread_id, policy_chunk=chunk)
+    except ContractError as exc:
+        return SectionResult(**base, status="error", error=str(exc), warnings=warnings, retrieval=retrieval), []
+
+    if warnings and not findings:
+        status, error = "error", warnings[0]
+    elif warnings:
+        status, error = "partial", None
+    else:
+        status, error = "ok", None
+    result = SectionResult(**base, status=status, finding_count=len(findings), error=error,
+                           paused=True, warnings=warnings, retrieval=retrieval)
+    return result, findings
 
 
 def analyze_policy(
@@ -58,21 +91,10 @@ def analyze_policy(
         started_at=utc_now(),
     )
     findings = []
-
     for index, chunk in enumerate(chunks):
         thread_id = f"{run.run_id}-s{index:03d}"
-        label = document.chunk_label(chunk)
-        try:
-            state = backend.run_section(chunk, thread_id)
-            section_findings = normalize_pipeline_state(state, thread_id=thread_id, policy_chunk=chunk)
-        except Exception as exc:  # noqa: BLE001 - one failed section must not sink the whole run
-            log.exception("Analysis failed for %s", label)
-            result = SectionResult(thread_id, chunk["chunk_id"], label, chunk.get("page"), "error",
-                                   error=describe_error(exc))
-        else:
-            findings.extend(section_findings)
-            result = SectionResult(thread_id, chunk["chunk_id"], label, chunk.get("page"), "ok",
-                                   finding_count=len(section_findings))
+        result, section_findings = _analyze_section(backend, chunk, thread_id, document.chunk_label(chunk))
+        findings.extend(section_findings)
         run.sections.append(result)
         if on_progress is not None:
             on_progress(index + 1, len(chunks), result)
@@ -83,25 +105,35 @@ def analyze_policy(
     return ReviewSession(run=run, findings=findings, passages={c["chunk_id"]: dict(c) for c in chunks})
 
 
+def _confirm(result, decisions: dict) -> None:
+    """Check the pipeline recorded exactly the decisions it was sent."""
+    final = result.get("findings") if isinstance(result, dict) else None
+    if not isinstance(final, list):
+        raise ContractError("The pipeline didn't return its final findings.")
+    recorded = {f.get("finding_id"): f.get("status") for f in final if isinstance(f, dict)}
+    for finding_id, decision in decisions.items():
+        if recorded.get(finding_id) != decision["decision"]:
+            raise ContractError(
+                f"The pipeline recorded {finding_id} as {recorded.get(finding_id)!r}, not {decision['decision']!r}."
+            )
+
+
 def finalize_review(backend: "ComplianceBackend", session: ReviewSession, reviewer) -> list[str]:
-    """Send each paused thread its approved findings, then lock the review.
+    """Send each paused run its decisions, then lock the review.
 
     Returns a list of errors. The review is only finalized when it's empty;
-    threads that resumed successfully aren't resumed again on a retry.
+    runs that resumed successfully aren't resumed again on a retry.
     """
     ok, reason = can_finalize(session, reviewer)
     if not ok:
         raise ReviewError(reason)
 
     errors = []
-    for thread_id, approved in resume_payloads(session).items():
+    for thread_id, decisions in decisions_by_thread(session).items():
         if thread_id in session.resumed_threads:
             continue
         try:
-            final_state = backend.submit_review(thread_id, approved)
-            confirmed = final_state.get("approved_findings") if isinstance(final_state, dict) else None
-            if not isinstance(confirmed, list) or len(confirmed) != len(approved):
-                raise ContractError("The pipeline didn't confirm the approved findings.")
+            _confirm(backend.submit_review(thread_id, decisions), decisions)
         except Exception as exc:  # noqa: BLE001 - report and let the reviewer retry
             log.exception("Resuming %s failed", thread_id)
             errors.append(f"{thread_id}: {describe_error(exc)}")

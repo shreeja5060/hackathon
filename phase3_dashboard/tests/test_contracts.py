@@ -5,6 +5,7 @@ import pytest
 from phase3_dashboard.core.contracts import (
     INVALID_COVERAGE,
     ContractError,
+    format_pipeline_errors,
     normalize_chat_answer,
     normalize_pipeline_state,
     validate_search_result,
@@ -24,10 +25,13 @@ class Pause:  # what langgraph.types.Interrupt looks like to the dashboard
 
 def auditor_entry(**overrides):
     entry = {
+        "finding_id": "F001",
         "requirement": "No credential sharing",
         "coverage": "Partial",
         "finding": "Doesn't say how sharing is detected.",
         "recommendation": "Add monitoring for shared credentials.",
+        "plain_language": "Sharing passwords is banned, but nobody checks.",
+        "clarifying_questions": ["Is shared-credential use monitored anywhere?"],
         "citation": {"chunk_id": "policy-abc", "source": "Computer Security Policy.pdf",
                      "locator": "Section 3.5 Credential Sharing"},
         "framework_control": "IA-5",
@@ -59,6 +63,36 @@ def test_auditor_output_becomes_a_clean_pending_finding():
     assert finding.requirement_text == "Users must not share passwords."  # recovered from the mapper
     assert finding.mapping_reasoning == "IA-5 covers authenticators."
     assert finding.citation.label() == "Computer Security Policy.pdf, Section 3.5 Credential Sharing, p. 2"
+    assert finding.source_finding_id == "F001"
+    assert finding.plain_language == "Sharing passwords is banned, but nobody checks."
+    assert finding.clarifying_questions == ["Is shared-credential use monitored anywhere?"]
+
+
+def test_mapper_details_are_matched_by_name_even_if_order_shifts():
+    # The auditor skips items that fail, so mapped and findings can be out of step.
+    mapped = [{"requirement": "Something that failed", "requirement_text": "x"},
+              {"requirement": "No credential sharing", "requirement_text": "Users must not share passwords."}]
+    [finding] = normalize(auditor_entry(), mapped=mapped)
+    assert finding.requirement_text == "Users must not share passwords."
+
+
+def test_findings_need_a_unique_pipeline_id_to_be_approvable():
+    [no_id] = normalize(auditor_entry(finding_id=None))
+    assert not no_id.approvable and any("finding_id" in p for p in no_id.problems)
+    first, second = normalize(auditor_entry(), auditor_entry())
+    assert first.approvable and not second.approvable
+
+
+def test_pipeline_errors_are_readable():
+    state = {"errors": [
+        {"stage": "extractor", "chunk_id": "policy-" + "a" * 64, "error": "Expecting value: line 1"},
+        {"stage": "auditor", "requirement": "MFA", "error": "timeout"},
+    ]}
+    assert format_pipeline_errors(state) == [
+        "Extractor failed: Expecting value: line 1",
+        "Auditor failed on MFA: timeout",
+    ]
+    assert format_pipeline_errors({}) == []
 
 
 def test_recommendation_none_means_no_change_needed():
@@ -129,6 +163,8 @@ def search_hit(**overrides):
 
 def test_search_results_are_validated():
     assert validate_search_result(search_hit()) == search_hit()
+    no_score = {k: v for k, v in search_hit().items() if k not in ("score", "doc_kind")}  # like fake_search
+    assert validate_search_result(no_score) == {**search_hit(), "score": None, "doc_kind": None}
     assert validate_search_result({**search_hit(), "parent_chunk_id": "x"}) == search_hit()  # extras dropped
     for bad in ({"score": 3.0}, {"score": float("nan")}, {"type": "policy"}, {"page": 0}, {"text": " "}):
         assert validate_search_result(search_hit(**bad)) is None

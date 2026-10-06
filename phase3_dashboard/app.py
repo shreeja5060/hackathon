@@ -119,6 +119,14 @@ def render_sidebar():
         if framework.get("note"):
             st.caption(escape_md(framework["note"]))
 
+        if not backend.simulated:
+            retrieval = backend.retrieval_backend or "unknown"
+            if backend.placeholder_retrieval:
+                st.warning(f"Phase 2 retrieval: {escape_md(retrieval)}. Findings won't use the real index.",
+                           icon=":material/warning:")
+            else:
+                st.caption(f"Phase 2 retrieval: {escape_md(retrieval)}")
+
         if backend.simulated:
             failing = st.toggle(
                 "Simulate a failing section",
@@ -198,6 +206,9 @@ def _run_analysis(backend, doc, chunk_ids):
             label = escape_md(result.label)
             if result.status == "ok":
                 status.write(f":material/check: {label}: {result.finding_count} finding(s)")
+            elif result.status == "partial":
+                status.write(f":material/warning: {label}: {result.finding_count} finding(s), "
+                             f"{len(result.warnings)} item(s) failed")
             else:
                 status.write(f":material/warning: {label}: {escape_md(result.error)}")
 
@@ -311,11 +322,23 @@ def page_review(backend, reviewer: str) -> None:
     ui.render_coverage_summary(counts)
     ui.render_review_progress(counts)
 
-    if run.section_errors:
-        with st.expander(f"{len(run.section_errors)} section(s) couldn't be analyzed", icon=":material/warning:"):
-            for section in run.section_errors:
-                st.markdown(f"**{escape_md(section.label)}**: {escape_md(section.error)}")
-            st.caption("These sections produced no findings. Re-run them after fixing the cause, or check them by hand.")
+    if any("placeholder" in backend_name.lower() for backend_name in run.retrieval_backends):
+        st.warning("Phase 2 used placeholder search (shared/fake_search.py) because Phase 1's retriever couldn't "
+                   "load. NIST matches came from a few sample chunks, not the real index. Install Phase 1's "
+                   "requirements and build its index, then analyze again.", icon=":material/warning:")
+
+    if run.problem_sections:
+        failed = len(run.section_errors)
+        partial = len(run.problem_sections) - failed
+        parts = ([f"{failed} section(s) couldn't be analyzed"] if failed else []) + \
+                ([f"{partial} section(s) were only partly analyzed"] if partial else [])
+        with st.expander(", ".join(parts), icon=":material/warning:"):
+            for section in run.problem_sections:
+                st.markdown(f"**{escape_md(section.label)}**")
+                for line in section.warnings or [section.error]:
+                    st.caption(escape_md(line))
+            st.caption("Items that failed produced no findings. Re-run those sections after fixing the cause, "
+                       "or check them by hand.")
 
     if session.finalized:
         st.success(f"Finalized by {escape_md(session.finalized_by)} on {ui.format_ts(session.finalized_at)}. "
@@ -374,9 +397,22 @@ def page_export() -> None:
 
 # ====================================================================== ask
 
+def _review_context() -> list[dict]:
+    """The current review's findings, under the IDs the reviewer sees, for the Q&A agent."""
+    session = st.session_state.review_session
+    if session is None:
+        return []
+    return [{**f.raw, "finding_id": f.finding_id, "status": f.status,
+             "recommendation": f.final_recommendation or "None"} for f in session.findings]
+
+
+def _chat_history() -> list[dict]:
+    return [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat if not m.get("error")]
+
+
 def _answer(backend, question: str) -> dict:
     try:
-        answer = normalize_chat_answer(backend.ask(question))
+        answer = normalize_chat_answer(backend.ask(question, findings=_review_context(), history=_chat_history()))
     except (BackendUnavailable, ContractError, ValueError) as exc:
         return {"role": "assistant", "content": f"I couldn't answer that: {exc}", "error": True}
     except Exception:  # noqa: BLE001 - the Q&A agent is outside code; never crash the page
@@ -390,14 +426,17 @@ def page_ask(backend) -> None:
     st.caption("Ask about the loaded policies and NIST controls. Answers list their sources, so check them "
                "before relying on an answer.")
     if not backend.simulated:
-        st.caption("Live mode searches Phase 1's index. Uploaded PDFs aren't in the index yet.")
+        st.caption("Live mode uses Anu's Q&A agent when it's on this branch, and otherwise shows the closest "
+                   "passages from Phase 1's index. It can see the findings in your current review. "
+                   "Uploaded PDFs aren't in the index yet.")
     for message in st.session_state.chat:
         ui.render_chat_message(message)
     question = st.chat_input("Ask a question, such as: Can staff share passwords?", key="chat_input",
                              max_chars=security.MAX_QUESTION_CHARS)
     if question and question.strip():
+        reply = _answer(backend, question.strip())  # history is taken before this question is added
         st.session_state.chat.append({"role": "user", "content": question.strip()})
-        st.session_state.chat.append(_answer(backend, question.strip()))
+        st.session_state.chat.append(reply)
         st.rerun()
 
 

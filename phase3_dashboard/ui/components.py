@@ -201,12 +201,17 @@ def render_finding_card(session: review.ReviewSession, finding: Finding, reviewe
         st.markdown(f"**{escape_md(finding.requirement)}**")
         if finding.requirement_text:
             st.markdown("> " + escape_md(finding.requirement_text))
+        if finding.plain_language:
+            st.markdown(f"**In plain words:** {escape_md(finding.plain_language)}")
         st.markdown(f"**Finding:** {escape_md(finding.finding)}")
         recommendation = escape_md(finding.recommendation) if finding.recommendation else "None needed."
         st.markdown(f"**AI recommendation:** {recommendation}")
         if finding.recommendation_edited is not None:
             edited = escape_md(finding.recommendation_edited) or "None"
             st.markdown(f"**Approved recommendation, edited by the reviewer:** {edited}")
+        if finding.clarifying_questions:
+            st.markdown("**Questions for the reviewer:**  \n" + "  \n".join(
+                f"• {escape_md(question)}" for question in finding.clarifying_questions))
         st.caption(f"Source: {escape_md(finding.citation.label())}")
         for problem in finding.problems:
             st.error(escape_md(problem), icon=":material/error:")
@@ -238,7 +243,9 @@ def render_chat_message(message: dict) -> None:
                     heading = f"**{escape_md(citation['source'])}**"
                     if where:
                         heading += f", {escape_md(where)}"
-                    st.markdown(f"{heading} (similarity {citation['score']:.2f})")
+                    if citation.get("score") is not None:
+                        heading += f" (similarity {citation['score']:.2f})"
+                    st.markdown(heading)
                     st.caption(escape_md(_preview(citation["text"])))
         if message.get("dropped"):
             st.caption(f"{message['dropped']} source(s) were left out because they weren't in the expected format.")

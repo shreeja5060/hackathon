@@ -42,7 +42,11 @@ def build_report(session: ReviewSession) -> dict[str, Any]:
             "started_at": run.started_at,
             "finished_at": run.finished_at,
             "sections_analyzed": len(run.sections),
-            "sections_failed": [{"section": s.label, "error": s.error} for s in run.section_errors],
+            "retrieval": run.retrieval_backends,
+            "sections_with_problems": [
+                {"section": s.label, "status": s.status, "problems": s.warnings or [s.error]}
+                for s in run.problem_sections
+            ],
         },
         "review": {
             "finalized_by": session.finalized_by,
@@ -69,6 +73,8 @@ def _finding_record(finding) -> dict[str, Any]:
         "coverage": finding.coverage,
         "framework_control": finding.framework_control,
         "finding": finding.finding,
+        "plain_language": finding.plain_language,
+        "clarifying_questions": list(finding.clarifying_questions),
         "recommendation": finding.final_recommendation,
         "recommendation_edited_by_reviewer": finding.recommendation_edited is not None,
         "citation": {
@@ -153,6 +159,7 @@ def to_markdown(report: dict[str, Any]) -> str:
                 lines += [f"> {_md(f['requirement_text'])}", ""]
             lines += [
                 f"- **Coverage:** {f['coverage']}, against {_md(f['framework_control'])}",
+                f"- **In plain words:** {_md(f['plain_language'])}",
                 f"- **Finding:** {_md(f['finding'])}",
                 f"- **Recommendation:** {_md(f['recommendation'])}",
             ]
@@ -162,14 +169,16 @@ def to_markdown(report: dict[str, Any]) -> str:
                 f"- **Source:** {_md(_source(f['citation']))}",
                 f"- **Approved by:** {_md(f['reviewer'])} at {f['reviewed_at']}",
             ]
+            if f["clarifying_questions"]:
+                lines.append(f"- **Questions raised:** {_md(' / '.join(f['clarifying_questions']))}")
             if f["reviewer_note"]:
                 lines.append(f"- **Reviewer note:** {_md(f['reviewer_note'])}")
             lines.append("")
 
-    failed = report["run"]["sections_failed"]
-    if failed:
-        lines += ["## Sections that could not be analyzed", ""]
-        lines += [f"- {_md(s['section'])}: {_md(s['error'])}" for s in failed]
+    problems = report["run"]["sections_with_problems"]
+    if problems:
+        lines += ["## Problems during analysis", ""]
+        lines += [f"- {_md(s['section'])}: {_md('; '.join(p for p in s['problems'] if p))}" for s in problems]
         lines.append("")
 
     lines += ["## Audit trail", "", "| Time (UTC) | Reviewer | Action | Finding |", "| --- | --- | --- | --- |"]
@@ -197,9 +206,9 @@ def _csv_cell(value) -> Any:
 
 
 CSV_COLUMNS = (
-    "id", "requirement", "coverage", "framework_control", "finding", "recommendation",
+    "id", "requirement", "coverage", "framework_control", "finding", "plain_language", "recommendation",
     "recommendation_edited_by_reviewer", "source", "locator", "page",
-    "reviewer", "reviewed_at", "reviewer_note", "requirement_text",
+    "reviewer", "reviewed_at", "reviewer_note", "requirement_text", "clarifying_questions",
 )
 
 
@@ -209,6 +218,7 @@ def to_csv(report: dict[str, Any]) -> str:
     writer.writeheader()
     for f in report["approved_findings"]:
         row = {key: f.get(key) for key in CSV_COLUMNS}
-        row.update(source=f["citation"]["source"], locator=f["citation"]["locator"], page=f["citation"]["page"])
+        row.update(source=f["citation"]["source"], locator=f["citation"]["locator"], page=f["citation"]["page"],
+                   clarifying_questions=" / ".join(f["clarifying_questions"]))
         writer.writerow({key: _csv_cell(value) for key, value in row.items()})
     return buffer.getvalue()

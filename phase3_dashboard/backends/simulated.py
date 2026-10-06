@@ -9,9 +9,11 @@ What it mirrors, and from which file:
 * search() ......... phase1_ingestion/retriever.py (same 8 fields, same argument checks)
 * Extractor ........ phase2_agents/extractor.py  -> requirement, requirement_text, source, chunk_id, locator
 * Mapper ........... phase2_agents/mapper.py     -> adds mapped_control, mapping_reasoning (in place)
-* Auditor .......... phase2_agents/auditor.py    -> the gap-report entry, status "pending"
-* the graph ........ phase2_agents/pipeline.py   -> pauses at human_review with {"message", "findings"},
-                                                     resumes with {"approved": [...]}
+* Auditor .......... phase2_agents/auditor.py    -> the gap-report entry, with plain_language and
+                                                     clarifying_questions, status "pending"
+* the graph ........ phase2_agents/pipeline.py   -> numbers findings F001, F002...; records failures in
+                                                     "errors"; pauses at human_review with {"message",
+                                                     "findings"}; resumes with {finding_id: {"decision"}}
 
 Keyword rules stand in for Claude's judgment, so the findings are plausible
 but are not real compliance results.
@@ -300,48 +302,60 @@ def simulated_audit_requirement(mapped: dict) -> dict:
     """Same gap-report entry as auditor.audit_requirement()."""
     control_id = mapped["mapped_control"]
     text = mapped["requirement_text"]
+    citation = {"chunk_id": mapped["chunk_id"], "source": mapped["source"], "locator": mapped["locator"]}
 
-    if control_id is None:
-        coverage = "Not observable"
-        finding = ("This requirement doesn't match a NIST SP 800-53 control, so coverage can't be judged "
-                   "from the policy text alone.")
-        recommendation = "Confirm which control this supports, or mark it as organization-specific guidance."
+    if control_id is None:  # auditor.py's own entry for "no matching control", word for word
+        return {
+            "requirement": mapped["requirement"],
+            "coverage": "Not observable",
+            "finding": "No matching framework control was found for this requirement in the current framework set.",
+            "recommendation": "Review manually, or expand the framework coverage to include a relevant control.",
+            "plain_language": "We could not find a rule in the framework that this policy statement "
+                              "corresponds to, so we cannot judge it automatically. A person should "
+                              "check whether it matters and which rule, if any, applies.",
+            "clarifying_questions": [
+                "Which framework control, if any, should this requirement be checked against?"
+            ],
+            "citation": citation,
+            "framework_control": None,
+            "status": "pending",
+        }
+
+    control = data.CONTROLS[control_id]
+    label = f"{control_id} ({control['title']})"
+    topic = mapped["requirement"].lower()
+    vague = _VAGUE.search(text)
+    if not re.search(control["core"], text, re.I):
+        coverage = "Missing"
+        finding = f"The text covers {topic} but doesn't require {control['core_desc']}, which is the core of {label}."
+        plain = f"The policy talks about {topic} but leaves out {control['core_desc']}."
+        questions = [f"Is {control['core_desc']} covered in another policy?"]
+    elif vague:
+        coverage = "Partial"
+        finding = f"Scope unclear: \"{vague.group(0)}\" isn't defined, so it's hard to verify {label}."
+        plain = f"The policy mentions this, but \"{vague.group(0)}\" is too vague to check."
+        questions = [f"What exactly does \"{vague.group(0)}\" mean here?"]
+    elif _SPECIFIC.search(text):
+        coverage, finding, plain, questions = (
+            "Full", f"States a specific, checkable expectation that meets the intent of {label}.",
+            "The policy already covers this clearly.", [])
+    elif _bucket(text, control_id) < 55:
+        coverage = "Partial"
+        finding = f"Addresses {label} but doesn't say who is responsible or how compliance is checked."
+        plain = "The policy covers this topic but doesn't say who does it or how it's checked."
+        questions = ["Who is responsible for this, and how is it checked?"]
     else:
-        control = data.CONTROLS[control_id]
-        label = f"{control_id} ({control['title']})"
-        vague = _VAGUE.search(text)
-        if not re.search(control["core"], text, re.I):
-            coverage = "Missing"
-            finding = (f"The text covers {mapped['requirement'].lower()} but doesn't require "
-                       f"{control['core_desc']}, which is the core of {label}.")
-            recommendation = control["recommendation"]
-        elif vague:
-            coverage = "Partial"
-            finding = f"Scope unclear: \"{vague.group(0)}\" isn't defined, so it's hard to verify {label}."
-            recommendation = control["recommendation"]
-        elif _SPECIFIC.search(text):
-            coverage = "Full"
-            finding = f"States a specific, checkable expectation that meets the intent of {label}."
-            recommendation = "None"
-        elif _bucket(text, control_id) < 55:
-            coverage = "Partial"
-            finding = f"Addresses {label} but doesn't say who is responsible or how compliance is checked."
-            recommendation = control["recommendation"]
-        else:
-            coverage = "Full"
-            finding = f"Clearly addresses the intent of {label}."
-            recommendation = "None"
+        coverage, finding, plain, questions = (
+            "Full", f"Clearly addresses the intent of {label}.", "The policy already covers this clearly.", [])
 
     return {
         "requirement": mapped["requirement"],
         "coverage": coverage,
         "finding": finding,
-        "recommendation": recommendation,
-        "citation": {
-            "chunk_id": mapped["chunk_id"],
-            "source": mapped["source"],
-            "locator": mapped["locator"],
-        },
+        "recommendation": "None" if coverage == "Full" else control["recommendation"],
+        "plain_language": plain,
+        "clarifying_questions": questions,
+        "citation": citation,
         "framework_control": control_id,
         "status": "pending",
     }
@@ -368,10 +382,14 @@ class SimulatedCommand:
 class SimulatedPipeline:
     """Behaves like the compiled graph in pipeline.py.
 
-    invoke({"policy_chunk": chunk}, config) runs Extractor -> Mapper -> Auditor
-    and pauses at human_review. invoke(SimulatedCommand(resume={"approved": [...]}),
-    config) resumes that thread and returns the state with approved_findings.
+    invoke({"chunks": [...], ...}, config) runs Extractor -> Mapper -> Auditor,
+    numbers the findings F001, F002..., records per-item failures in "errors"
+    and pauses at human_review. invoke(SimulatedCommand(resume=decisions), config)
+    applies {finding_id: {"decision", "recommendation"?}} the same way
+    human_review_node does and returns the state with final_findings.
     """
+
+    REVIEW_MESSAGE = "Review these findings. Nothing is final until you decide."
 
     def __init__(self, delay: float = 0.0, fail_section_index: int | None = None):
         self.delay = delay
@@ -382,30 +400,49 @@ class SimulatedPipeline:
     def invoke(self, payload, config):
         thread_id = config["configurable"]["thread_id"]
         if isinstance(payload, SimulatedCommand):
-            return self._resume(thread_id, payload.resume)
+            return self._resume(thread_id, payload.resume or {})
 
-        chunk = payload["policy_chunk"]
+        chunks = payload["chunks"]
         if self.delay:
             time.sleep(self.delay)
-        if self.fail_section_index is not None and thread_id.endswith(f"-s{self.fail_section_index:03d}"):
-            # What a bad model reply looks like inside extractor.py: json.loads() fails.
-            json.loads("Sure! Here are the requirements I found:\n[")
-
-        requirements = simulated_extract_requirements(chunk)
+        failing = self.fail_section_index is not None and thread_id.endswith(f"-s{self.fail_section_index:03d}")
+        requirements, errors = [], []
+        for chunk in chunks:
+            try:
+                if failing:  # what a malformed model reply looks like inside extractor.py
+                    json.loads("Sure! Here are the requirements I found:\n[")
+                requirements.extend(simulated_extract_requirements(chunk))
+            except Exception as exc:  # noqa: BLE001 - pipeline.py isolates per-item failures the same way
+                errors.append({"stage": "extractor", "chunk_id": chunk.get("chunk_id"), "error": str(exc)})
         mapped = [simulated_map_requirement(requirement) for requirement in requirements]
-        gap_report = [simulated_audit_requirement(item) for item in mapped]
-        state = {"policy_chunk": chunk, "requirements": requirements, "mapped": mapped, "gap_report": gap_report}
+        findings = [simulated_audit_requirement(item) for item in mapped]
+        for number, finding in enumerate(findings, start=1):
+            finding["finding_id"] = f"F{number:03d}"
+
+        state = {"chunks": chunks, "requirements": requirements, "mapped": mapped,
+                 "findings": findings, "final_findings": [], "errors": errors}
         with self._lock:
             self._threads[thread_id] = dict(state)
-        pause = SimulatedInterrupt(value={"message": "Please review these findings", "findings": gap_report})
+        pause = SimulatedInterrupt(value={"message": self.REVIEW_MESSAGE, "findings": findings})
         return {**state, "__interrupt__": [pause]}
 
-    def _resume(self, thread_id: str, decision) -> dict:
+    def _resume(self, thread_id: str, decisions: dict) -> dict:
         with self._lock:
             state = self._threads.pop(thread_id, None)
         if state is None:
             raise RuntimeError(f"There is no paused run for thread {thread_id}.")
-        state["approved_findings"] = decision["approved"]
+        final = []
+        for finding in state["findings"]:
+            decision = decisions.get(finding["finding_id"], {})
+            status = decision.get("decision", "pending")
+            if status not in {"approved", "rejected"}:
+                status = "pending"  # undecided items stay pending, never silently approved
+            out = dict(finding, status=status)
+            if decision.get("recommendation"):
+                out["recommendation"] = decision["recommendation"]
+                out["recommendation_edited_by_human"] = True
+            final.append(out)
+        state["final_findings"] = final
         return state
 
 
@@ -457,8 +494,14 @@ class SimulatedBackend(ComplianceBackend):
         self._uploads: dict[str, PolicyDocument] = {}
         self._framework_chunks = [make_framework_chunk(cid, control) for cid, control in data.CONTROLS.items()]
 
+    retrieval_backend = "simulator (keyword rules)"
+    placeholder_retrieval = False
+
     def set_failing_section(self, index: int | None) -> None:
         self.pipeline.fail_section_index = index
+
+    def run_section(self, chunk: dict, thread_id: str) -> dict:
+        return {**super().run_section(chunk, thread_id), "retrieval_backend": self.retrieval_backend}
 
     def list_policies(self) -> list[str]:
         return list(self._samples)
@@ -491,5 +534,5 @@ class SimulatedBackend(ComplianceBackend):
     def search(self, query, type=None, top_k=5):  # noqa: A002
         return simulated_search(self.corpus(), query, type=type, top_k=top_k)
 
-    def ask(self, question: str) -> dict:
+    def ask(self, question: str, findings: list[dict] | None = None, history: list[dict] | None = None) -> dict:
         return simulated_answer(self.corpus(), question)

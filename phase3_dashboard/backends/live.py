@@ -1,23 +1,27 @@
-"""Live backend: connects the dashboard to the real Phase 1 and Phase 2 code.
+"""Live backend: connects the dashboard to the real Phase 1 and Phase 2 code on main.
 
-It works once phase1-maryam and phase2-shreeja are merged into your branch.
 It doesn't change their code; it only calls it:
 
-* phase2_agents/pipeline.py ........... `app`, the compiled LangGraph. invoke() runs a
-                                         section and pauses; Command(resume=...) resumes it
+* phase2_agents/pipeline.py ........... start_review([chunk], run_id) runs Extractor -> Mapper ->
+                                         Auditor and pauses; submit_decisions(run_id, decisions)
+                                         resumes it with the reviewer's choices
 * phase1_ingestion/chunk_policies.py .. chunk_pages(), to split uploaded PDFs
-* phase1_ingestion/retriever.py ....... search(), for the chat while the Q&A agent is missing
 * data/processed/policy_chunks.json ... the policies Phase 1 already indexed
 * chroma_db/index_manifest.json ....... the framework version, for the sidebar and report
+* qa_agent (Anu's Q&A agent) .......... used for the chat when it's on the branch
 
-To plug in the Q&A agent, set COPILOT_QA_MODULE="package.module:function".
-The function must take a question and return {"answer": str, "citations": [search() results]}.
+pipeline.py quietly falls back to shared/fake_search.py when Phase 1's
+retriever can't load. The dashboard reports which one is in use, so placeholder
+results are never mistaken for real ones.
+
+COPILOT_QA_MODULE="package.module:function" overrides which Q&A function is used.
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -78,21 +82,39 @@ class LiveBackend(ComplianceBackend):
         except ImportError as exc:
             raise BackendUnavailable("LangGraph isn't installed. Run: pip install -r requirements.txt") from exc
         module = _load_pipeline(self._root)
+        missing = [name for name in ("app", "start_review", "submit_decisions") if not hasattr(module, name)]
+        if missing:
+            raise BackendUnavailable(
+                f"phase2_agents/pipeline.py has no {', '.join(missing)}. Pull the latest main."
+            )
         super().__init__(module.app, Command)
+        self._pipeline = module
+        self.retrieval_backend = getattr(module, "RETRIEVER_BACKEND", None)
         self._indexed: dict[str, list[dict]] | None = None
+
+    @property
+    def placeholder_retrieval(self) -> bool:
+        return "placeholder" in (self.retrieval_backend or "").lower()
 
     # ------------------------------------------------------------ pipeline
 
     def run_section(self, chunk: dict, thread_id: str) -> dict:
-        state = super().run_section(chunk, thread_id)
-        if isinstance(state, dict) and "__interrupt__" not in state:
-            # Some LangGraph versions don't include the pause in invoke()'s
-            # result. Read it from the saved checkpoint instead.
-            snapshot = self._app.get_state(self._config(thread_id))
-            pauses = [p for task in getattr(snapshot, "tasks", ()) for p in getattr(task, "interrupts", ())]
-            if pauses:
-                state = {**state, "__interrupt__": pauses}
+        run = self._pipeline.start_review([chunk], run_id=thread_id)
+        try:  # the mapper output isn't in start_review()'s result, but it's in the paused state
+            values = self._app.get_state(self._config(thread_id)).values or {}
+        except Exception:  # noqa: BLE001 - extra detail only; the findings are still usable
+            values = {}
+        state = {
+            "mapped": values.get("mapped", []),
+            "errors": run.get("errors", []),
+            "retrieval_backend": run.get("backend", self.retrieval_backend),
+        }
+        if run.get("status") == "awaiting_human_review":
+            state["__interrupt__"] = [{"message": "Awaiting human review", "findings": run.get("findings", [])}]
         return state
+
+    def submit_review(self, thread_id: str, decisions: dict) -> dict:
+        return self._pipeline.submit_decisions(thread_id, decisions)
 
     # ------------------------------------------------------------ policies
 
@@ -176,25 +198,27 @@ class LiveBackend(ComplianceBackend):
     # ------------------------------------------------------------ chat
 
     def _qa_function(self):
+        """COPILOT_QA_MODULE if set; otherwise Anu's qa_agent once it's merged."""
         target = os.getenv("COPILOT_QA_MODULE", "").strip()
         if not target:
-            return None
+            if importlib.util.find_spec("qa_agent") is None:
+                return None
+            target = "qa_agent.agent:ask"
         module_name, _, function_name = target.partition(":")
         try:
             return getattr(importlib.import_module(module_name), function_name or "ask")
-        except (ImportError, AttributeError) as exc:
-            raise BackendUnavailable(f"COPILOT_QA_MODULE={target!r} couldn't be loaded ({_short(exc)}).") from exc
+        except Exception as exc:  # noqa: BLE001 - surface as a clear chat message
+            raise BackendUnavailable(f"The Q&A agent ({target}) couldn't be loaded ({_short(exc)}).") from exc
 
-    def ask(self, question: str) -> dict:
+    def ask(self, question: str, findings: list[dict] | None = None, history: list[dict] | None = None) -> dict:
         qa = self._qa_function()
         if qa is not None:
-            return qa(question)
-        try:
-            from phase1_ingestion.retriever import search
-        except ImportError as exc:
-            raise BackendUnavailable("Neither the Q&A agent nor Phase 1's retriever is on this branch.") from exc
-        return {
-            "answer": "Retrieval only: the Q&A agent isn't connected yet, so these are the closest passages "
-                      "from the index, without an AI-written answer.",
-            "citations": search(question, type=None, top_k=4),
-        }
+            accepted = inspect.signature(qa).parameters
+            extras = {name: value for name, value in (("findings", findings), ("history", history))
+                      if name in accepted and value}
+            return qa(question, **extras)
+        answer = ("Retrieval only: the Q&A agent isn't on this branch yet, so these are the closest passages "
+                  "from the index, without an AI-written answer.")
+        if self.placeholder_retrieval:
+            answer += " Phase 2 is using placeholder search, so these come from a few sample chunks."
+        return {"answer": answer, "citations": self._pipeline.search(question, type=None, top_k=4)}

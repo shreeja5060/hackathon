@@ -3,7 +3,8 @@
 Every finding the agents produce goes through normalize_pipeline_state()
 before the dashboard shows it. That function:
 
-* checks each finding against the shape phase2_agents/auditor.py returns,
+* checks each finding against the shape phase2_agents/pipeline.py returns
+  (the auditor's entry plus the finding_id that start_review() adds),
 * turns it into a typed Finding the UI can rely on,
 * records structural problems (these block approval) and quality flags
   (shown to the reviewer, not blocking), and
@@ -27,13 +28,15 @@ STATUS_VALUES = ("pending", "approved", "rejected")
 SEARCH_TYPES = ("internal", "framework", "evidence")
 SEARCH_FIELDS = ("chunk_id", "text", "source", "page", "type", "doc_kind", "locator", "score")
 
-# What auditor.py returns today, plus two fields the dashboard recovers from
-# the mapper output. Anything else is kept and shown as "Other fields".
+# What pipeline.py's findings contain today, plus two fields the dashboard
+# recovers from the mapper output. Anything else is kept as "Other fields".
 KNOWN_FINDING_FIELDS = frozenset({
-    "requirement", "coverage", "finding", "recommendation", "citation",
-    "framework_control", "status", "requirement_text", "mapping_reasoning",
+    "finding_id", "requirement", "coverage", "finding", "recommendation", "plain_language",
+    "clarifying_questions", "citation", "framework_control", "status",
+    "requirement_text", "mapping_reasoning",
 })
 MAX_FIELD_CHARS = 4000
+MAX_QUESTIONS = 5
 _NO_RECOMMENDATION = frozenset({"", "none", "n/a", "na", "null", "-", "—"})
 _CONTROL_ID = re.compile(
     r"^(?:[A-Z]{2}-\d{1,2}(?:\(\d{1,2}\))?"  # SP 800-53, e.g. AC-2 or IA-2(1)
@@ -76,7 +79,10 @@ class Finding:
     framework_control: str | None
     mapping_reasoning: str | None
     citation: Citation
-    raw: dict[str, Any]  # the auditor's original dict, sent back on resume
+    raw: dict[str, Any]  # the pipeline's original dict
+    source_finding_id: str | None = None  # the pipeline's own ID (e.g. "F003"), used to send the decision back
+    plain_language: str | None = None
+    clarifying_questions: list[str] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)  # block approval
     flags: list[str] = field(default_factory=list)  # shown, not blocking
@@ -103,9 +109,12 @@ class SectionResult:
     chunk_id: str
     label: str
     page: int | None
-    status: str  # "ok" or "error"
+    status: str  # "ok", "partial" (some items failed) or "error"
     finding_count: int = 0
     error: str | None = None
+    paused: bool = False  # the pipeline thread is waiting for review decisions
+    warnings: list[str] = field(default_factory=list)  # per-item failures the pipeline recorded
+    retrieval: str | None = None  # which search backend Phase 2 used
 
 
 @dataclass
@@ -126,7 +135,16 @@ class AnalysisRun:
 
     @property
     def ok_threads(self) -> list[str]:
-        return [s.thread_id for s in self.sections if s.status == "ok"]
+        """Threads paused at human review; each one gets the reviewer's decisions on finalize."""
+        return [s.thread_id for s in self.sections if s.paused]
+
+    @property
+    def problem_sections(self) -> list[SectionResult]:
+        return [s for s in self.sections if s.status != "ok"]
+
+    @property
+    def retrieval_backends(self) -> list[str]:
+        return sorted({s.retrieval for s in self.sections if s.retrieval})
 
 
 @dataclass(frozen=True)
@@ -216,6 +234,34 @@ def _parse_citation(raw, problems, flags, policy_chunk) -> Citation:
     return Citation(source=source or "Unknown source", chunk_id=chunk_id, locator=locator, page=page)
 
 
+def format_pipeline_errors(state) -> list[str]:
+    """pipeline.py records per-item failures in state["errors"] instead of raising."""
+    errors = state.get("errors") if isinstance(state, dict) else None
+    lines = []
+    for error in errors or []:
+        if isinstance(error, dict):
+            stage = error.get("stage") or "pipeline"
+            subject = error.get("requirement")  # the section label already says which chunk
+            message = " ".join(str(error.get("error", "")).split())
+            line = f"{stage.capitalize()} failed" + (f" on {subject}" if subject else "") + f": {message}"
+        else:
+            line = " ".join(str(error).split())
+        lines.append(line if len(line) <= 300 else line[:300] + "…")
+    return lines
+
+
+def _clean_questions(value, flags) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        flags.append("'clarifying_questions' should be a list.")
+        return []
+    questions = [" ".join(q.split()) for q in value if isinstance(q, str) and q.strip()]
+    if len(questions) > MAX_QUESTIONS:
+        flags.append(f"Only the first {MAX_QUESTIONS} clarifying questions are shown.")
+    return [q[:MAX_FIELD_CHARS] for q in questions[:MAX_QUESTIONS]]
+
+
 def read_review_pause(state) -> list:
     """Return the findings list from the pipeline's human_review pause.
 
@@ -244,7 +290,11 @@ def read_review_pause(state) -> list:
 def normalize_pipeline_state(state, *, thread_id: str, policy_chunk: dict | None = None) -> list[Finding]:
     """Turn one paused pipeline run into validated findings (IDs are set by the caller)."""
     raw_findings = read_review_pause(state)
-    mapped = state.get("mapped") if isinstance(state.get("mapped"), list) else []
+    # The mapper's output carries requirement_text and mapping_reasoning that the
+    # findings don't. Match by requirement name, because the auditor skips items
+    # that failed, so positions can shift.
+    unmatched = [m for m in (state.get("mapped") or []) if isinstance(m, dict)]
+    seen_ids: set[str] = set()
     findings = []
 
     for position, raw in enumerate(raw_findings):
@@ -279,11 +329,21 @@ def normalize_pipeline_state(state, *, thread_id: str, policy_chunk: dict | None
                 "because only a reviewer can approve or reject."
             )
 
-        # auditor.py drops requirement_text and mapping_reasoning, but the
-        # mapper output in the same state has them, in the same order.
-        partner = mapped[position] if position < len(mapped) and isinstance(mapped[position], dict) else {}
-        if partner.get("requirement") != raw.get("requirement"):
-            partner = {}
+        source_id = raw.get("finding_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            problems.append("This finding has no finding_id, so a decision on it can't be sent back to the pipeline.")
+            source_id = None
+        elif source_id in seen_ids:
+            problems.append(f"The pipeline sent two findings with the ID {source_id}.")
+        else:
+            seen_ids.add(source_id)
+
+        plain = _clean_text(raw.get("plain_language"), "plain_language", problems, flags, required=False)
+        questions = _clean_questions(raw.get("clarifying_questions"), flags)
+
+        partner = next((m for m in unmatched if m.get("requirement") == raw.get("requirement")), {})
+        if partner:
+            unmatched.remove(partner)
         requirement_text = _clean_text(
             raw.get("requirement_text", partner.get("requirement_text")),
             "requirement_text", problems, flags, required=False,
@@ -306,6 +366,9 @@ def normalize_pipeline_state(state, *, thread_id: str, policy_chunk: dict | None
             mapping_reasoning=reasoning,
             citation=citation,
             raw=dict(raw),
+            source_finding_id=source_id,
+            plain_language=plain,
+            clarifying_questions=questions,
             extras={k: v for k, v in raw.items() if k not in KNOWN_FINDING_FIELDS},
             problems=problems,
             flags=flags,
@@ -316,9 +379,14 @@ def normalize_pipeline_state(state, *, thread_id: str, policy_chunk: dict | None
 # --------------------------------------------------------- search and chat
 
 def validate_search_result(item) -> dict | None:
-    """Return a clean copy of one Phase 1 search() result, or None if it's malformed."""
-    if not isinstance(item, dict) or not set(SEARCH_FIELDS) <= item.keys():
+    """Return a clean copy of one search() result, or None if it's malformed.
+
+    chunk_id, text, source and type are required. page, locator, doc_kind and
+    score may be missing (shared/fake_search.py has no score) and become None.
+    """
+    if not isinstance(item, dict) or not {"chunk_id", "text", "source", "type"} <= item.keys():
         return None
+    item = {key: item.get(key) for key in SEARCH_FIELDS}
     if not isinstance(item["text"], str) or not item["text"].strip():
         return None
     if not isinstance(item["source"], str) or not item["source"]:
@@ -331,11 +399,12 @@ def validate_search_result(item) -> dict | None:
     if item["locator"] is not None and not isinstance(item["locator"], str):
         return None
     score = item["score"]
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    if not math.isfinite(score) or not -1.0 <= score <= 1.0:
-        return None
-    return {key: item[key] for key in SEARCH_FIELDS}
+    if score is not None:
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return None
+        if not math.isfinite(score) or not -1.0 <= score <= 1.0:
+            return None
+    return item
 
 
 def normalize_chat_answer(payload) -> ChatAnswer:

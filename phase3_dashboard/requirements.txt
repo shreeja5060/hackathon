@@ -1,9 +1,0 @@
-# Phase 3 dashboard. From the repo root:
-#   pip install -r phase3_dashboard/requirements.txt
-#
-# Live mode also needs the team's root requirements.txt (LangGraph, Anthropic,
-# Chroma, sentence-transformers) once phase1 and phase2 are merged.
-streamlit>=1.64
-pandas>=2.2
-pymupdf>=1.24
-pytest>=8

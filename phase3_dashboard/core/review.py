@@ -11,7 +11,6 @@ The rules live here rather than in the UI, so a widget bug can't bypass them:
 
 from __future__ import annotations
 
-import copy
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -205,27 +204,24 @@ def can_finalize(session: ReviewSession, reviewer) -> tuple[bool, str]:
     return True, "Every finding has a decision."
 
 
-def resume_payloads(session: ReviewSession) -> dict[str, list[dict]]:
-    """What each paused pipeline thread gets back: its approved findings only.
+def decisions_by_thread(session: ReviewSession) -> dict[str, dict[str, dict]]:
+    """What each paused pipeline thread gets back, in submit_decisions()'s format:
 
-    Each item is the auditor's original dict plus the review fields, so
-    pipeline.py's approved_findings keeps the agents' format.
+        {finding_id: {"decision": "approved" | "rejected", "recommendation": edited text (optional)}}
+
+    Rejections are sent too, so the pipeline's final record matches the review.
+    Threads whose sections produced no findings get an empty dict, which still
+    closes the paused run.
     """
-    payloads: dict[str, list[dict]] = {thread: [] for thread in session.run.ok_threads}
+    decisions: dict[str, dict[str, dict]] = {thread: {} for thread in session.run.ok_threads}
     for finding in session.findings:
-        if finding.status != "approved":
+        if finding.status == "pending" or not finding.source_finding_id:
             continue
-        item = copy.deepcopy(finding.raw)
-        item["status"] = "approved"
-        item["reviewer"] = finding.reviewer
-        item["reviewed_at"] = finding.reviewed_at
-        if finding.reviewer_note:
-            item["reviewer_note"] = finding.reviewer_note
-        if finding.recommendation_edited is not None:
-            item["recommendation_ai_original"] = finding.raw.get("recommendation")
-            item["recommendation"] = finding.recommendation_edited or "None"
-        payloads.setdefault(finding.thread_id, []).append(item)
-    return payloads
+        decision = {"decision": finding.status}
+        if finding.status == "approved" and finding.recommendation_edited is not None:
+            decision["recommendation"] = finding.recommendation_edited or "None"
+        decisions.setdefault(finding.thread_id, {})[finding.source_finding_id] = decision
+    return decisions
 
 
 def mark_finalized(session: ReviewSession, reviewer) -> None:

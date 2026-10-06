@@ -82,33 +82,47 @@ def test_finalize_waits_for_every_decision(sim_backend, sample_session):
         analysis.finalize_review(sim_backend, sample_session, REVIEWER)
 
 
-def test_finalize_resumes_each_thread_with_only_its_approved_findings(sim_backend, sample_session):
+def test_finalize_sends_every_decision_back_to_its_paused_run(sim_backend, sample_session):
     rejected = first(sample_session, "Missing")
     review.reject(sample_session, rejected.finding_id, REVIEWER, "Not applicable here")
     edited = first(sample_session, "Partial")
     review.approve(sample_session, edited.finding_id, REVIEWER, edited_recommendation="Edited text.")
     decide_all(sample_session)
 
-    sent = {}
+    sent, results = {}, {}
     original_submit = sim_backend.submit_review
 
-    def spy(thread_id, approved):
-        sent[thread_id] = approved
-        return original_submit(thread_id, approved)
+    def spy(thread_id, decisions):
+        sent[thread_id] = decisions
+        results[thread_id] = original_submit(thread_id, decisions)
+        return results[thread_id]
 
     sim_backend.submit_review = spy
     assert analysis.finalize_review(sim_backend, sample_session, REVIEWER) == []
     assert sample_session.finalized and sample_session.finalized_by == REVIEWER
-    assert set(sent) == set(sample_session.run.ok_threads)  # threads with zero findings resume too
-    approved = [item for items in sent.values() for item in items]
-    assert len(approved) == len(sample_session.findings) - 1
-    assert all(item["status"] == "approved" and item["reviewer"] == REVIEWER for item in approved)
-    resumed_edit = next(i for i in approved if i["requirement"] == edited.requirement)
-    assert resumed_edit["recommendation"] == "Edited text."
-    assert resumed_edit["recommendation_ai_original"] == edited.recommendation
+    assert set(sent) == set(sample_session.run.ok_threads)  # runs with zero findings are closed too
+
+    assert sent[rejected.thread_id][rejected.source_finding_id] == {"decision": "rejected"}
+    assert sent[edited.thread_id][edited.source_finding_id] == {"decision": "approved", "recommendation": "Edited text."}
+    total = sum(len(d) for d in sent.values())
+    assert total == len(sample_session.findings)
+
+    # The pipeline's own final record now matches the review.
+    final = [f for r in results.values() for f in r["findings"]]
+    assert sum(f["status"] == "rejected" for f in final) == 1
+    assert not any(f["status"] == "pending" for f in final)
+    assert next(f for f in final if f["requirement"] == edited.requirement)["recommendation"] == "Edited text."
 
     with pytest.raises(review.ReviewError):  # locked after finalizing
         review.reopen(sample_session, edited.finding_id, REVIEWER)
+
+
+def test_finalize_fails_if_the_pipeline_records_a_different_decision(sim_backend, sample_session):
+    decide_all(sample_session)
+    sim_backend.submit_review = lambda thread_id, decisions: {
+        "findings": [{"finding_id": fid, "status": "pending"} for fid in decisions]}
+    errors = analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+    assert errors and "recorded" in errors[0] and not sample_session.finalized
 
 
 def test_a_failed_resume_is_retried_without_repeating_successful_threads(sim_backend, sample_session):
@@ -116,11 +130,11 @@ def test_a_failed_resume_is_retried_without_repeating_successful_threads(sim_bac
     calls = []
     original_submit = sim_backend.submit_review
 
-    def flaky(thread_id, approved):
+    def flaky(thread_id, decisions):
         calls.append(thread_id)
         if len(calls) == 2:
             raise ConnectionError("checkpoint store unavailable")
-        return original_submit(thread_id, approved)
+        return original_submit(thread_id, decisions)
 
     sim_backend.submit_review = flaky
     errors = analysis.finalize_review(sim_backend, sample_session, REVIEWER)

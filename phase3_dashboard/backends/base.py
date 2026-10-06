@@ -49,12 +49,21 @@ class ComplianceBackend(ABC):
         return {"configurable": {"thread_id": thread_id}}
 
     def run_section(self, chunk: dict, thread_id: str) -> dict:
-        """Run Extractor -> Mapper -> Auditor on one chunk. Returns the state paused at human_review."""
-        return self._app.invoke({"policy_chunk": chunk}, config=self._config(thread_id))
+        """Run Extractor -> Mapper -> Auditor on one chunk and stop at human review.
 
-    def submit_review(self, thread_id: str, approved: list[dict]) -> dict:
-        """Resume a paused thread with the findings the reviewer approved."""
-        return self._app.invoke(self._command(resume={"approved": approved}), config=self._config(thread_id))
+        Returns the graph state: "mapped", "findings", "errors" and the pause
+        under "__interrupt__" (whose value holds {"message", "findings"}).
+        """
+        empty = {key: [] for key in ("requirements", "mapped", "findings", "final_findings", "errors")}
+        return self._app.invoke({"chunks": [chunk], **empty}, config=self._config(thread_id))
+
+    def submit_review(self, thread_id: str, decisions: dict) -> dict:
+        """Resume a paused run with {finding_id: {"decision", "recommendation"?}}.
+
+        Returns {"findings": final findings with their status, "errors": [...]}.
+        """
+        state = self._app.invoke(self._command(resume=decisions), config=self._config(thread_id))
+        return {"findings": state.get("final_findings", []), "errors": state.get("errors", [])}
 
     @abstractmethod
     def list_policies(self) -> list[str]:
@@ -73,5 +82,10 @@ class ComplianceBackend(ABC):
         """Title, version and source of the framework, for the sidebar and the report."""
 
     @abstractmethod
-    def ask(self, question: str) -> dict[str, Any]:
-        """Answer a question: {"answer": str, "citations": [search() results]}."""
+    def ask(self, question: str, findings: list[dict] | None = None,
+            history: list[dict] | None = None) -> dict[str, Any]:
+        """Answer a question: {"answer": str, "citations": [search() results]}.
+
+        findings (the current review) and history (earlier chat turns) give the
+        Q&A agent context; backends that can't use them ignore them.
+        """

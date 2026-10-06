@@ -18,7 +18,6 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from anthropic import Anthropic
 
 
 # Retrieval backend: use Maryam's real retriever (phase1_ingestion) when its
@@ -37,7 +36,7 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+from claude_client import client, MODEL
 
 
 AUDITOR_PROMPT = """You are a compliance auditor. Compare the policy \
@@ -115,7 +114,7 @@ def audit_requirement(mapped_requirement: dict) -> dict:
     )
 
     response = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=MODEL,
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )

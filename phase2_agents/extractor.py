@@ -14,7 +14,6 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from anthropic import Anthropic
 
 # Import our shared placeholder search function (Maryam's real one will
 # replace this later - same function name, so nothing else has to change).
@@ -35,7 +34,7 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+from claude_client import client, MODEL
 
 
 EXTRACTOR_PROMPT = """You are a compliance analyst. Read the policy text below \
@@ -64,7 +63,7 @@ def extract_requirements(chunk: dict) -> list[dict]:
     prompt = EXTRACTOR_PROMPT.format(policy_text=chunk["text"])
 
     response = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=MODEL,
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )

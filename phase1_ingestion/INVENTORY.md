@@ -39,7 +39,7 @@ Inventory provides declared context, not proof of effective permissions,
 configuration or control applicability. A privileged label does not prove which
 organizational NIST requirements apply. The separate phase2_integration prototype
 has not been updated to consume this inventory; its existing applicability caveat
-remains valid. Team agent integration is still pending. Logs remain future work.
+remains valid. Security-log ingestion is documented separately in [LOGS.md](LOGS.md).
 
 Local validation completed: parser/source-link checks, preservation of unknown
 values, malformed fixture rejection, and Python syntax. Live Chroma retrieval

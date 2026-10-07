@@ -8,9 +8,15 @@ pymupdf==1.28.2
 chromadb==1.5.9
 sentence-transformers==6.1.0
 
-# Phase 3: dashboard (Streamlit path)
-streamlit>=1.38.0
+# Phase 2: agent pipeline (pipeline.py)
+langgraph>=1.0.0
+
+# Phase 3: dashboard (needs Python 3.10+; built and tested on Streamlit 1.64)
+streamlit>=1.64.0
 pandas>=2.2.0
 
 # Shared / utils
 pydantic>=2.8.0
+
+# Tests
+pytest>=8.0.0

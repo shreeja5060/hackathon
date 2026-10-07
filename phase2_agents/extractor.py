@@ -54,6 +54,49 @@ Policy text:
 """
 
 
+def _normalize_requirements(parsed) -> list[dict]:
+    """
+    Claude is asked for a JSON list of {"requirement", "requirement_text"}
+    objects, but it does not always comply exactly. Accept the sensible
+    variants, and raise a clear error (instead of a cryptic TypeError later)
+    for anything else, so the pipeline logs it and moves on.
+
+      [{"requirement": ..., "requirement_text": ...}]   expected
+      {"requirements": [ ... ]}                          list wrapped in an object
+      ["plain sentence", ...]                            bare strings
+      {} / []                                            nothing to extract
+    """
+    if isinstance(parsed, dict):
+        # unwrap {"requirements": [...]} (or any single list-valued key)
+        lists = [v for v in parsed.values() if isinstance(v, list)]
+        if len(lists) == 1:
+            parsed = lists[0]
+        elif not parsed:
+            return []
+        else:
+            raise ValueError(f"Extractor reply was an object with no single list: keys={list(parsed)[:5]}")
+
+    if not isinstance(parsed, list):
+        raise ValueError(f"Extractor reply was {type(parsed).__name__}, expected a list")
+
+    out = []
+    for item in parsed:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append({"requirement": text[:80], "requirement_text": text})
+        elif isinstance(item, dict):
+            text = item.get("requirement_text") or item.get("text") or item.get("requirement")
+            if not text:
+                raise ValueError(f"Extractor item has no requirement text: keys={list(item)[:5]}")
+            out.append({**item,
+                        "requirement": item.get("requirement") or str(text)[:80],
+                        "requirement_text": text})
+        else:
+            raise ValueError(f"Extractor item was {type(item).__name__}, expected object or string")
+    return out
+
+
 def extract_requirements(chunk: dict) -> list[dict]:
     """
     Takes one chunk (from search(), matching the shared schema) and returns
@@ -75,7 +118,7 @@ def extract_requirements(chunk: dict) -> list[dict]:
         raw_text = raw_text.strip("`")
         raw_text = raw_text.replace("json\n", "", 1)
 
-    requirements = json.loads(raw_text)
+    requirements = _normalize_requirements(json.loads(raw_text))
 
     # Attach the citation so downstream agents (Mapper, Auditor) and the
     # dashboard can always show "where did this come from"

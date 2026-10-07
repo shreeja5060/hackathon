@@ -245,3 +245,35 @@ def test_full_pipeline_skips_failed_chunk_and_continues(monkeypatch, tmp_path):
     errors = json.loads((tmp_path / "pipeline_errors.json").read_text())
     assert len(errors) == 1 and errors[0]["stage"] == "extractor"
     assert (tmp_path / "full_gap_report.json").exists()
+
+
+# ---------- Extractor: tolerate the reply shapes Claude actually produces ----------
+# Regression for: "Extractor failed: 'str' object does not support item assignment"
+# (seen in the dashboard's live end-to-end tests when Claude returned a shape
+# other than a list of objects).
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"requirements": [{"requirement": "r1", "requirement_text": "t1"}]}),
+    json.dumps(["Privileged accounts must be reviewed every quarter."]),
+    json.dumps([{"requirement_text": "only text, no short name"}]),
+])
+def test_extractor_accepts_common_reply_shapes(fake_claude, sample_chunk, reply):
+    fake_claude(extractor, reply)
+    reqs = extractor.extract_requirements(sample_chunk)
+    assert len(reqs) == 1
+    r = reqs[0]
+    assert r["requirement"] and r["requirement_text"]
+    assert r["source"] == sample_chunk["source"]          # citation still attached
+    assert r["chunk_id"] == sample_chunk["chunk_id"]
+
+
+def test_extractor_empty_object_means_no_requirements(fake_claude, sample_chunk):
+    fake_claude(extractor, "{}")
+    assert extractor.extract_requirements(sample_chunk) == []
+
+
+@pytest.mark.parametrize("reply", ['"just a sentence"', '42', '{"a": 1, "b": 2}', '[1, 2]'])
+def test_extractor_unusable_shapes_raise_a_clear_error(fake_claude, sample_chunk, reply):
+    fake_claude(extractor, reply)
+    with pytest.raises(ValueError):
+        extractor.extract_requirements(sample_chunk)

@@ -45,12 +45,16 @@ RUN if [ -f phase3_dashboard/requirements.txt ]; then \
 # Build the search index (policies, NIST SP 800-53 + CSF, synthetic evidence),
 # then check it. The embedding model is cached under HF_HOME for runtime,
 # where the retriever loads it with local_files_only.
+# The evidence loaders run only once their Phase 1 branches are on main.
 RUN python phase1_ingestion/parse_pdfs.py \
  && python phase1_ingestion/chunk_policies.py \
  && python phase1_ingestion/download_frameworks.py \
  && python phase1_ingestion/load_frameworks.py \
- && python -m phase1_ingestion.load_environment \
- && python -m phase1_ingestion.load_inventory \
+ && for loader in load_environment load_inventory; do \
+        if [ -f "phase1_ingestion/$loader.py" ]; then \
+            python -m "phase1_ingestion.$loader" || exit 1; \
+        fi; \
+    done \
  && python phase1_ingestion/chunk_and_embed.py \
  && python -m phase1_ingestion.check_retriever
 

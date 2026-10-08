@@ -106,7 +106,7 @@ def _pending(session: ReviewSession, finding_id: str) -> Finding:
 
 # ---------------------------------------------------------------- actions
 
-def approve(session, finding_id, reviewer, *, edited_recommendation=None, note="") -> None:
+def approve(session, finding_id, reviewer, *, edited_recommendation=None, note="", bulk=False) -> None:
     """Approve a finding, optionally with the reviewer's edited recommendation."""
     _ensure_open(session)
     reviewer = clean_reviewer(reviewer)
@@ -127,19 +127,74 @@ def approve(session, finding_id, reviewer, *, edited_recommendation=None, note="
                 raise ReviewError("A gap needs a recommendation. Write one, or restore the AI's text.")
             edited = proposed
 
+    # Was the approved text the assistant's wording, accepted as is?
+    from_assistant = edited is not None and edited == (finding.assistant_suggestion or "").strip()
+
     finding.status = "approved"
     finding.reviewer = reviewer
     finding.reviewed_at = utc_now()
     finding.reviewer_note = note
     finding.recommendation_edited = edited
+    finding.recommendation_origin = None if edited is None else ("assistant" if from_assistant else "reviewer")
 
     detail: dict[str, Any] = {"coverage": finding.coverage, "control": finding.framework_control}
     if note:
         detail["note"] = note
+    if bulk:
+        detail["bulk"] = True
     if edited is not None:
         detail["recommendation_before"] = finding.recommendation
         detail["recommendation_after"] = edited
-    _log(session, reviewer, "approved_with_edits" if edited is not None else "approved", finding_id, **detail)
+    if from_assistant:
+        action = "approved_with_ai_suggestion"
+    elif edited is not None:
+        action = "approved_with_edits"
+        if finding.assistant_suggestion:
+            detail["assistant_suggestion"] = finding.assistant_suggestion  # what the reviewer started from
+    else:
+        action = "approved"
+    _log(session, reviewer, action, finding_id, **detail)
+
+
+def bulk_approvable(session: ReviewSession) -> list[Finding]:
+    """Pending Full-coverage findings with no validation problems or flags.
+
+    These need no change, so the reviewer can approve them together. Anything
+    flagged, partial or missing still gets a one-by-one decision.
+    """
+    return [f for f in session.findings
+            if f.status == "pending" and f.coverage == "Full" and not f.problems and not f.flags]
+
+
+def approve_all_full(session, reviewer, note="") -> int:
+    """Approve every finding bulk_approvable() returns; each one is logged separately."""
+    _ensure_open(session)
+    reviewer = clean_reviewer(reviewer)
+    note = _clean_note(note) or "Bulk approval: Full coverage, no flags"
+    findings = bulk_approvable(session)
+    for finding in findings:
+        approve(session, finding.finding_id, reviewer, note=note, bulk=True)
+    return len(findings)
+
+
+def record_suggestion(session, finding_id, text, requested_by, question="") -> None:
+    """Hold the assistant's suggested wording on a finding for the reviewer to accept or ignore.
+
+    This never changes the finding's recommendation or status: the reviewer
+    applies it with the Use this wording button and still has to approve.
+    """
+    finding = session.get(finding_id)
+    if session.finalized:
+        return
+    text = " ".join(str(text or "").split())[:MAX_RECOMMENDATION_CHARS]
+    if not text or text == finding.assistant_suggestion:
+        return
+    finding.assistant_suggestion = text
+    who = " ".join(str(requested_by or "").split())[:MAX_REVIEWER_CHARS] or "Unnamed reviewer"
+    detail: dict[str, Any] = {"suggestion": text}
+    if question:
+        detail["question"] = " ".join(str(question).split())[:MAX_NOTE_CHARS]
+    _log(session, who, "assistant_suggested", finding_id, **detail)
 
 
 def reject(session, finding_id, reviewer, reason) -> None:
@@ -156,6 +211,7 @@ def reject(session, finding_id, reviewer, reason) -> None:
     finding.reviewed_at = utc_now()
     finding.reviewer_note = reason
     finding.recommendation_edited = None
+    finding.recommendation_origin = None
     _log(session, reviewer, "rejected", finding_id,
          coverage=finding.coverage, control=finding.framework_control, reason=reason)
 
@@ -173,6 +229,7 @@ def reopen(session, finding_id, reviewer) -> None:
     finding.reviewed_at = None
     finding.reviewer_note = ""
     finding.recommendation_edited = None
+    finding.recommendation_origin = None
     _log(session, reviewer, "reopened", finding_id, previous_status=previous)
 
 
@@ -222,6 +279,32 @@ def decisions_by_thread(session: ReviewSession) -> dict[str, dict[str, dict]]:
             decision["recommendation"] = finding.recommendation_edited or "None"
         decisions.setdefault(finding.thread_id, {})[finding.source_finding_id] = decision
     return decisions
+
+
+def assistant_context(session: ReviewSession | None) -> list[dict]:
+    """The review's findings for the Q&A agent, under the IDs the reviewer sees.
+
+    Each carries its status, the recommendation as it stands, the reviewer's
+    note and the cited passage's text (so uploads that aren't indexed still
+    have their evidence).
+    """
+    if session is None:
+        return []
+    context = []
+    for f in session.findings:
+        passage = session.passages.get(f.citation.chunk_id) if f.citation.chunk_id else None
+        context.append({
+            **f.raw,
+            "finding_id": f.finding_id,
+            "status": f.status,
+            "recommendation": f.final_recommendation or "None",
+            "requirement_text": f.requirement_text,
+            "plain_language": f.plain_language,
+            "clarifying_questions": list(f.clarifying_questions),
+            "reviewer_note": f.reviewer_note or None,
+            "cited_text": passage["text"] if passage else None,
+        })
+    return context
 
 
 def mark_finalized(session: ReviewSession, reviewer) -> None:

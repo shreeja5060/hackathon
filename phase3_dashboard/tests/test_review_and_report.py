@@ -182,3 +182,70 @@ def test_csv_export_blocks_spreadsheet_formulas(sim_backend, sample_session):
     rows = list(csv.DictReader(io.StringIO(to_csv(finalized(sim_backend, sample_session)))))
     assert rows[0]["finding"].startswith("'=")
     assert {"id", "coverage", "framework_control", "source", "reviewer"} <= set(rows[0])
+
+
+# ---------------------------------------------------------------- assistant suggestions and bulk approval
+
+def test_a_suggestion_changes_nothing_until_the_reviewer_approves_it(sample_session):
+    finding = first(sample_session, "Partial")
+    before = (finding.status, finding.recommendation, finding.final_recommendation)
+    review.record_suggestion(sample_session, finding.finding_id, "Review accounts every 90 days.", REVIEWER,
+                             "Suggest better wording")
+    assert (finding.status, finding.recommendation, finding.final_recommendation) == before
+    assert finding.assistant_suggestion == "Review accounts every 90 days."
+    event = sample_session.audit_log[-1]
+    assert event.action == "assistant_suggested" and event.detail["question"] == "Suggest better wording"
+
+    review.approve(sample_session, finding.finding_id, REVIEWER,
+                   edited_recommendation="Review accounts every 90 days.")
+    assert finding.recommendation_origin == "assistant"
+    assert sample_session.audit_log[-1].action == "approved_with_ai_suggestion"
+
+
+def test_editing_the_assistants_wording_counts_as_the_reviewers_edit(sample_session):
+    finding = first(sample_session, "Partial")
+    review.record_suggestion(sample_session, finding.finding_id, "Review accounts quarterly.", REVIEWER)
+    review.approve(sample_session, finding.finding_id, REVIEWER,
+                   edited_recommendation="Review accounts quarterly and log each review.")
+    assert finding.recommendation_origin == "reviewer"
+    event = sample_session.audit_log[-1]
+    assert event.action == "approved_with_edits" and event.detail["assistant_suggestion"] == "Review accounts quarterly."
+
+
+def test_suggestions_are_ignored_after_sign_off(sim_backend, sample_session):
+    decide_all(sample_session)
+    analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+    finding = sample_session.findings[0]
+    review.record_suggestion(sample_session, finding.finding_id, "Too late", REVIEWER)
+    assert finding.assistant_suggestion is None
+
+
+def test_bulk_approval_skips_flagged_and_gap_findings(sample_session):
+    flagged = first(sample_session, "Full")
+    flagged.flags.append("Coverage is Full but a recommendation was given.")
+    eligible = review.bulk_approvable(sample_session)
+    assert flagged not in eligible and all(f.coverage == "Full" and not f.flags for f in eligible)
+    assert review.approve_all_full(sample_session, REVIEWER) == len(eligible)
+    assert all(f.status == "approved" for f in eligible) and flagged.status == "pending"
+    assert all(e.detail["bulk"] for e in sample_session.audit_log)
+    with pytest.raises(review.ReviewError):
+        review.approve_all_full(sample_session, "  ")
+
+
+def test_report_marks_where_each_approved_recommendation_came_from(sim_backend, sample_session):
+    by_ai, by_person = [f for f in sample_session.findings if f.coverage == "Partial"][:2]
+    review.record_suggestion(sample_session, by_ai.finding_id, "Assistant wording.", REVIEWER)
+    review.approve(sample_session, by_ai.finding_id, REVIEWER, edited_recommendation="Assistant wording.")
+    review.approve(sample_session, by_person.finding_id, REVIEWER, edited_recommendation="My wording.")
+    decide_all(sample_session)
+    assert analysis.finalize_review(sim_backend, sample_session, REVIEWER) == []
+    report = build_report(sample_session)
+    records = {f["id"]: f for f in report["approved_findings"]}
+    assert records[by_ai.finding_id]["recommendation_origin"] == "assistant"
+    assert records[by_person.finding_id]["recommendation_origin"] == "reviewer"
+    markdown = to_markdown(report)
+    assert "_(AI assistant's wording, accepted by reviewer)_" in markdown
+    assert "_(edited by reviewer)_" in markdown
+    assert "Assistant suggested wording" in markdown and "Approved with the assistant's wording" in markdown
+    signed_line = markdown.split("Signed off by:** ")[1].split("\n")[0]
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$", signed_line)  # readable time, not ISO

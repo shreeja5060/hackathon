@@ -25,7 +25,7 @@ from phase3_dashboard.core import analysis, review
 from phase3_dashboard.core.contracts import normalize_chat_answer
 from phase3_dashboard.core.security import UploadRejected
 
-from .conftest import CHUNKS, make_pdf, needs_chunker, needs_pipeline
+from .conftest import CHUNKS, make_pdf, needs_chunker, needs_pipeline, needs_qa_agent
 
 def analyze(backend, chunks=CHUNKS):
     document = PolicyDocument(source="Computer Security Policy.pdf", chunks=chunks, origin="indexed")
@@ -138,3 +138,37 @@ def test_missing_phase2_code_gives_a_clear_message(tmp_path):
     with pytest.raises(BackendUnavailable) as error:
         LiveBackend(repo_root=tmp_path)
     assert "phase2" in str(error.value).lower() or "langgraph" in str(error.value).lower()
+
+
+# ---------------------------------------------------------------- Anu's Q&A agent inside the review
+
+@needs_pipeline
+@needs_qa_agent
+def test_qa_agent_reads_the_review_and_its_suggestion_reaches_the_reviewer(live, qa_agent):
+    from phase3_dashboard.core.contracts import normalize_chat_answer
+
+    from .conftest import SUGGESTED
+
+    session = analyze(live, CHUNKS[:1])
+    mfa = session.findings[0]
+    raw = live.ask(f"Suggest a stronger recommendation for finding {mfa.finding_id}.",
+                   findings=review.assistant_context(session), history=[])
+    answer = normalize_chat_answer(raw, known_finding_ids={f.finding_id for f in session.findings})
+
+    # Anu's agent saw the review, fetched the finding's evidence and proposed wording.
+    first_prompt = qa_agent.calls[0]["messages"][-1]["content"]
+    assert mfa.finding_id in first_prompt and "Partial" in first_prompt
+    tool_results = qa_agent.calls[1]["messages"][-1]["content"]
+    evidence = next(r["content"] for r in tool_results if "Policy text the finding cites" in r["content"])
+    assert "multi-factor authentication where required" in evidence  # the dashboard's cited_text
+    assert answer.suggestions == ({"finding_id": mfa.finding_id, "recommendation": SUGGESTED},)
+    assert [c["ref"] for c in answer.citations] == [1, 2] and "[1]" in answer.answer and "[2]" in answer.answer
+
+    # The suggestion waits; the reviewer applies it and approves; the pipeline records it.
+    review.record_suggestion(session, mfa.finding_id, SUGGESTED, "Mahsa", "Suggest a stronger recommendation")
+    assert mfa.recommendation != SUGGESTED and mfa.status == "pending"
+    review.approve(session, mfa.finding_id, "Mahsa", edited_recommendation=SUGGESTED)
+    review.reject(session, session.findings[1].finding_id, "Mahsa", "No control applies here")
+    assert analysis.finalize_review(live, session, "Mahsa") == []
+    final = live._app.get_state(live._config(mfa.thread_id)).values["final_findings"]
+    assert final[0]["recommendation"] == SUGGESTED and final[0]["recommendation_edited_by_human"] is True

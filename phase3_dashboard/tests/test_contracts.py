@@ -176,3 +176,25 @@ def test_chat_answers_are_validated():
     for bad in (None, {"answer": ""}, {"citations": []}):
         with pytest.raises(ContractError):
             normalize_chat_answer(bad)
+
+
+def test_chat_suggestions_are_validated_and_citations_keep_their_numbers():
+    answer = normalize_chat_answer({
+        "answer": "Use MFA [1] and see [3].",
+        "citations": [search_hit(), {"bad": 1}, search_hit(chunk_id="d", locator="IA-2")],
+        "suggestions": [
+            {"finding_id": "F-001", "recommendation": "  Require   MFA  "},
+            {"finding_id": "F-001", "recommendation": "Second one for the same finding"},
+            {"finding_id": "F-404", "recommendation": "Not in this review"},
+            {"finding_id": "F-002", "recommendation": "   "},
+            "not a dict",
+        ],
+    }, known_finding_ids={"F-001", "F-002"})
+    assert [c["ref"] for c in answer.citations] == [1, 3]  # [3] still points at the IA-2 passage
+    assert answer.suggestions == ({"finding_id": "F-001", "recommendation": "Require MFA"},)
+    assert answer.dropped_suggestions == 4
+
+
+def test_answers_without_suggestions_still_work():
+    answer = normalize_chat_answer({"answer": "Yes.", "citations": []})
+    assert answer.suggestions == () and answer.dropped_suggestions == 0

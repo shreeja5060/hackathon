@@ -329,7 +329,7 @@ def simulated_audit_requirement(mapped: dict) -> dict:
         coverage = "Missing"
         finding = f"The text covers {topic} but doesn't require {control['core_desc']}, which is the core of {label}."
         plain = f"The policy talks about {topic} but leaves out {control['core_desc']}."
-        questions = [f"Is {control['core_desc']} covered in another policy?"]
+        questions = [f"Does another policy cover {control['core_desc']}?"]
     elif vague:
         coverage = "Partial"
         finding = f"Scope unclear: \"{vague.group(0)}\" isn't defined, so it's hard to verify {label}."
@@ -446,29 +446,103 @@ class SimulatedPipeline:
         return state
 
 
-def simulated_answer(corpus: list[dict], question: str) -> dict:
-    """Stands in for the Q&A agent: {"answer", "citations"} with search() results as citations."""
+_WANTS_SUGGESTION = re.compile(r"\b(?:suggest\w*|improv\w*|rewrit\w*|better|stronger|reword\w*|fix\w*)\b", re.I)
+_FINDING_REF = re.compile(r"\bF-?\d{1,3}\b", re.I)
+_REVIEW_FILTERS = (  # word in the question -> which findings it means
+    ("rejected", "status", "rejected"), ("approved", "status", "approved"), ("pending", "status", "pending"),
+    ("missing", "coverage", "Missing"), ("partial", "coverage", "Partial"), ("full", "coverage", "Full"),
+)
+
+
+def _finding_label(finding: dict) -> str:
+    return f"{finding.get('finding_id')} ({finding.get('requirement')})"
+
+
+def _targets(question: str, findings: list[dict]) -> list[dict]:
+    """The findings a question is about: IDs it names, else a status/coverage word it uses."""
+    by_id = {str(f.get("finding_id", "")).upper(): f for f in findings}
+    named = []
+    for ref in _FINDING_REF.findall(question):
+        number = re.sub(r"\D", "", ref)
+        key = f"F-{int(number):03d}"
+        if key in by_id and by_id[key] not in named:
+            named.append(by_id[key])
+    if named:
+        return named
+    lowered = question.lower()
+    for word, field_name, value in _REVIEW_FILTERS:
+        if re.search(rf"\b{word}\b", lowered):
+            return [f for f in findings if f.get(field_name) == value]
+    return []
+
+
+def _stronger_recommendation(finding: dict) -> str | None:
+    control = data.CONTROLS.get(finding.get("framework_control") or "")
+    if control is None:
+        return None
+    return (f"{control['recommendation']} Name the role that owns this requirement, "
+            "and review it at least once a year.")
+
+
+def _answer_about_review(corpus, question, findings) -> dict | None:
+    targets = _targets(question, findings)
+    if not targets:
+        return None
+    if _WANTS_SUGGESTION.search(question):
+        proposals = [(f, _stronger_recommendation(f)) for f in targets[:5]]
+        proposals = [(f, text) for f, text in proposals if text]
+        if not proposals:
+            return None
+        citations = [make_framework_chunk(f["framework_control"], data.CONTROLS[f["framework_control"]])
+                     for f, _ in proposals]
+        lines = [f"For {_finding_label(f)}, I suggest: {text} [{n}]"
+                 for n, (f, text) in enumerate(proposals, start=1)]
+        return {
+            "answer": "Simulated suggestion (rules, not Claude). " + " ".join(lines)
+                      + " The wording is waiting on each finding for you to accept or ignore.",
+            "citations": [{**chunk, "score": 1.0} for chunk in citations],
+            "suggestions": [{"finding_id": f["finding_id"], "recommendation": text} for f, text in proposals],
+        }
+    listed = "; ".join(f"{_finding_label(f)}: {f.get('coverage')}, {f.get('status')}" for f in targets[:12])
+    return {"answer": f"Simulated answer (rules, not Claude). {len(targets)} finding(s) match: {listed}.",
+            "citations": [], "suggestions": []}
+
+
+def simulated_answer(corpus: list[dict], question: str, findings: list[dict] | None = None) -> dict:
+    """Stands in for Anu's Q&A agent: {"answer", "citations", "suggestions"}.
+
+    With the review's findings it can list them ("which findings are Missing?")
+    and propose stronger recommendations ("suggest better wording for the
+    rejected findings"), the same way qa_agent's propose_recommendation tool does.
+    """
+    if findings:
+        about_review = _answer_about_review(corpus, question, findings)
+        if about_review is not None:
+            return about_review
     hits = simulated_search(corpus, question, top_k=5)
     relevant = [hit for hit in hits if hit["score"] >= 0.15]
     if not relevant:
         return {
             "answer": "Simulated answer: I couldn't find this in the loaded policies or NIST controls. "
                       "Try different words.",
-            "citations": [],
+            "citations": [], "suggestions": [],
         }
     parts = ["Simulated answer (keyword matching, not Claude)."]
+    citations = []
     policy = next((hit for hit in relevant if hit["type"] == "internal"), None)
     control = next((hit for hit in relevant if hit["type"] == "framework"), None)
     if policy:
+        citations.append(policy)
         heading, body = _heading_and_body(policy)
         sentences = _sentences(body)
         quote = next((s for s in sentences if _CUE.search(s)), sentences[0] if sentences else body)
         where = policy["locator"] or f"page {policy['page']}"
-        parts.append(f"{policy['source']}, {where}, says: \"{quote}\"")
+        parts.append(f"{policy['source']}, {where}, says: \"{quote}\" [{len(citations)}]")
     if control:
+        citations.append(control)
         title = control["text"].split("\n", 1)[0].split(": ", 1)[-1]
-        parts.append(f"The closest NIST SP 800-53 control is {control['locator']} ({title}).")
-    return {"answer": " ".join(parts), "citations": relevant[:3]}
+        parts.append(f"The closest NIST SP 800-53 control is {control['locator']} ({title}) [{len(citations)}].")
+    return {"answer": " ".join(parts), "citations": citations, "suggestions": []}
 
 
 # ======================================================================
@@ -535,4 +609,4 @@ class SimulatedBackend(ComplianceBackend):
         return simulated_search(self.corpus(), query, type=type, top_k=top_k)
 
     def ask(self, question: str, findings: list[dict] | None = None, history: list[dict] | None = None) -> dict:
-        return simulated_answer(self.corpus(), question)
+        return simulated_answer(self.corpus(), question, findings)

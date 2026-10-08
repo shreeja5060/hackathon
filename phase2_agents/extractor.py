@@ -14,7 +14,6 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from anthropic import Anthropic
 
 # Import our shared placeholder search function (Maryam's real one will
 # replace this later - same function name, so nothing else has to change).
@@ -35,7 +34,8 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+from claude_client import make_client, MODEL
+client = make_client()
 
 
 EXTRACTOR_PROMPT = """You are a compliance analyst. Read the policy text below \
@@ -55,6 +55,50 @@ Policy text:
 """
 
 
+def _normalize_requirements(parsed) -> list[dict]:
+    """
+    Claude is asked for a JSON list of {"requirement", "requirement_text"}
+    objects, but it does not always comply exactly. Accept the sensible
+    variants, and raise a clear error (instead of a cryptic TypeError later)
+    for anything else, so the pipeline logs it and moves on.
+
+      [{"requirement": ..., "requirement_text": ...}]   expected
+      {"requirements": [ ... ]}                          list wrapped under "requirements"
+      ["plain sentence", ...]                            bare strings
+      {} / []                                            nothing to extract
+    """
+    if isinstance(parsed, dict):
+        if not parsed:
+            return []
+        # Only unwrap the one wrapper we expect. Any other object is NOT a
+        # requirements reply (e.g. another agent's reply), so fail loudly
+        # instead of guessing and producing nonsense requirements.
+        if isinstance(parsed.get("requirements"), list):
+            parsed = parsed["requirements"]
+        else:
+            raise ValueError(f"Extractor reply was an object without a 'requirements' list: keys={list(parsed)[:5]}")
+
+    if not isinstance(parsed, list):
+        raise ValueError(f"Extractor reply was {type(parsed).__name__}, expected a list")
+
+    out = []
+    for item in parsed:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append({"requirement": text[:80], "requirement_text": text})
+        elif isinstance(item, dict):
+            text = item.get("requirement_text") or item.get("text") or item.get("requirement")
+            if not text:
+                raise ValueError(f"Extractor item has no requirement text: keys={list(item)[:5]}")
+            out.append({**item,
+                        "requirement": item.get("requirement") or str(text)[:80],
+                        "requirement_text": text})
+        else:
+            raise ValueError(f"Extractor item was {type(item).__name__}, expected object or string")
+    return out
+
+
 def extract_requirements(chunk: dict) -> list[dict]:
     """
     Takes one chunk (from search(), matching the shared schema) and returns
@@ -64,7 +108,7 @@ def extract_requirements(chunk: dict) -> list[dict]:
     prompt = EXTRACTOR_PROMPT.format(policy_text=chunk["text"])
 
     response = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=MODEL,
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -76,7 +120,7 @@ def extract_requirements(chunk: dict) -> list[dict]:
         raw_text = raw_text.strip("`")
         raw_text = raw_text.replace("json\n", "", 1)
 
-    requirements = json.loads(raw_text)
+    requirements = _normalize_requirements(json.loads(raw_text))
 
     # Attach the citation so downstream agents (Mapper, Auditor) and the
     # dashboard can always show "where did this come from"

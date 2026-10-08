@@ -245,3 +245,69 @@ def test_full_pipeline_skips_failed_chunk_and_continues(monkeypatch, tmp_path):
     errors = json.loads((tmp_path / "pipeline_errors.json").read_text())
     assert len(errors) == 1 and errors[0]["stage"] == "extractor"
     assert (tmp_path / "full_gap_report.json").exists()
+
+
+# ---------- Extractor: tolerate the reply shapes Claude actually produces ----------
+# Regression for: "Extractor failed: 'str' object does not support item assignment"
+# (seen in the dashboard's live end-to-end tests when Claude returned a shape
+# other than a list of objects).
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"requirements": [{"requirement": "r1", "requirement_text": "t1"}]}),
+    json.dumps(["Privileged accounts must be reviewed every quarter."]),
+    json.dumps([{"requirement_text": "only text, no short name"}]),
+])
+def test_extractor_accepts_common_reply_shapes(fake_claude, sample_chunk, reply):
+    fake_claude(extractor, reply)
+    reqs = extractor.extract_requirements(sample_chunk)
+    assert len(reqs) == 1
+    r = reqs[0]
+    assert r["requirement"] and r["requirement_text"]
+    assert r["source"] == sample_chunk["source"]          # citation still attached
+    assert r["chunk_id"] == sample_chunk["chunk_id"]
+
+
+def test_extractor_empty_object_means_no_requirements(fake_claude, sample_chunk):
+    fake_claude(extractor, "{}")
+    assert extractor.extract_requirements(sample_chunk) == []
+
+
+@pytest.mark.parametrize("reply", ['"just a sentence"', '42', '{"a": 1, "b": 2}', '[1, 2]'])
+def test_extractor_unusable_shapes_raise_a_clear_error(fake_claude, sample_chunk, reply):
+    fake_claude(extractor, reply)
+    with pytest.raises(ValueError):
+        extractor.extract_requirements(sample_chunk)
+
+
+# ---------- Agents must not share a Claude client ----------
+# Regression: with one shared client object, patching extractor.client,
+# mapper.client and auditor.client patched the SAME object, so the last stub
+# answered every agent (dashboard live tests failed with "'control_id'").
+
+def test_each_agent_owns_its_own_claude_client():
+    assert extractor.client is not mapper.client
+    assert extractor.client is not auditor.client
+    assert mapper.client is not auditor.client
+
+
+def test_stubbing_one_agent_does_not_affect_the_others(monkeypatch, sample_chunk):
+    import conftest
+    monkeypatch.setattr(extractor.client.messages, "create",
+        lambda **k: conftest._FakeResponse(json.dumps([{"requirement": "E", "requirement_text": "e"}])))
+    monkeypatch.setattr(mapper.client.messages, "create",
+        lambda **k: conftest._FakeResponse(json.dumps({"control_id": "IA-2", "reasoning": "m"})))
+    monkeypatch.setattr(auditor.client.messages, "create",
+        lambda **k: conftest._FakeResponse(json.dumps({"coverage": "Full", "finding": "a", "recommendation": "None",
+                                                       "plain_language": "", "clarifying_questions": ["q?"]})))
+    reqs = extractor.extract_requirements(sample_chunk)
+    assert [r["requirement"] for r in reqs] == ["E"]          # not the auditor's "q?"
+    mapped = mapper.map_requirement(reqs[0])
+    assert mapped["mapped_control"] == "IA-2"                  # not a KeyError
+
+
+def test_extractor_rejects_another_agents_reply_instead_of_inventing_requirements(fake_claude, sample_chunk):
+    auditor_shaped = json.dumps({"coverage": "Partial", "finding": "f", "recommendation": "r",
+                                 "plain_language": "p", "clarifying_questions": ["Which systems count as privileged?"]})
+    fake_claude(extractor, auditor_shaped)
+    with pytest.raises(ValueError):
+        extractor.extract_requirements(sample_chunk)

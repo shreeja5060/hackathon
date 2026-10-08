@@ -107,8 +107,14 @@ def test_uploads_are_split_by_phase1s_chunker(live):
     document = live.parse_upload("Uploaded Policy.pdf", make_pdf(
         ["1 Purpose\nThis policy protects data.\n2 Passwords\nPasswords must be long."]))
     assert [c["locator"] for c in document.chunks] == ["Section 1 Purpose", "Section 2 Passwords"]
-    with pytest.raises(UploadRejected, match="chunker"):
-        live.parse_upload("No Headings.pdf", make_pdf(["Just a paragraph without numbered sections."]))
+    # A PDF without numbered sections: rejected by the chunker on main today; split into
+    # "Page N" chunks once Maryam's phase1-document-ingestion branch is merged. Both are fine.
+    try:
+        plain = live.parse_upload("No Headings.pdf", make_pdf(["Just a paragraph without numbered sections."]))
+    except UploadRejected as exc:
+        assert "chunker" in str(exc)
+    else:
+        assert [c["locator"] for c in plain.chunks] == ["Page 1"] and plain.chunks[0]["page"] == 1
 
 
 @needs_pipeline

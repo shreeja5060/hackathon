@@ -12,6 +12,17 @@ import sys
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
+# These tests are written against the placeholder search (shared/fake_search.py),
+# so force it, whatever is installed. Without this, a machine that has Phase 1's
+# real index (Cloud Shell, a Linux box, Apple Silicon) makes the agents pick the
+# real retriever and a number of tests fail because the data is different, even
+# though the code is fine. Setting a module to None in sys.modules makes
+# `from retriever import ...` raise ImportError, which the agents catch and
+# fall back. This must run before any agent module is imported.
+# Run these tests separately from phase3_dashboard/tests (as CI does), because
+# that suite chooses its own backend.
+sys.modules["retriever"] = None
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "phase2_agents"))
 sys.path.insert(0, os.path.join(ROOT, "shared"))

@@ -1,6 +1,6 @@
 -c constraints-phase1.txt
 # Core
-anthropic>=0.40.0
+anthropic[vertex]>=0.40.0   # the vertex extra adds google-auth for CLAUDE_BACKEND=vertex
 python-dotenv>=1.0.0
 
 # Phase 1: ingestion & RAG

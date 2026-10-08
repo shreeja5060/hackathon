@@ -30,7 +30,8 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-from claude_client import client, MODEL
+from claude_client import make_client, MODEL
+client = make_client()
 
 
 # Notice the "Example" block below - this is the few-shot technique.

@@ -36,7 +36,8 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-from claude_client import client, MODEL
+from claude_client import make_client, MODEL
+client = make_client()
 
 
 AUDITOR_PROMPT = """You are a compliance auditor. Compare the policy \

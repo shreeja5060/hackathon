@@ -34,7 +34,8 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 load_dotenv()
-from claude_client import client, MODEL
+from claude_client import make_client, MODEL
+client = make_client()
 
 
 EXTRACTOR_PROMPT = """You are a compliance analyst. Read the policy text below \
@@ -62,19 +63,20 @@ def _normalize_requirements(parsed) -> list[dict]:
     for anything else, so the pipeline logs it and moves on.
 
       [{"requirement": ..., "requirement_text": ...}]   expected
-      {"requirements": [ ... ]}                          list wrapped in an object
+      {"requirements": [ ... ]}                          list wrapped under "requirements"
       ["plain sentence", ...]                            bare strings
       {} / []                                            nothing to extract
     """
     if isinstance(parsed, dict):
-        # unwrap {"requirements": [...]} (or any single list-valued key)
-        lists = [v for v in parsed.values() if isinstance(v, list)]
-        if len(lists) == 1:
-            parsed = lists[0]
-        elif not parsed:
+        if not parsed:
             return []
+        # Only unwrap the one wrapper we expect. Any other object is NOT a
+        # requirements reply (e.g. another agent's reply), so fail loudly
+        # instead of guessing and producing nonsense requirements.
+        if isinstance(parsed.get("requirements"), list):
+            parsed = parsed["requirements"]
         else:
-            raise ValueError(f"Extractor reply was an object with no single list: keys={list(parsed)[:5]}")
+            raise ValueError(f"Extractor reply was an object without a 'requirements' list: keys={list(parsed)[:5]}")
 
     if not isinstance(parsed, list):
         raise ValueError(f"Extractor reply was {type(parsed).__name__}, expected a list")

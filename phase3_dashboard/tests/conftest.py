@@ -123,3 +123,63 @@ def live(monkeypatch):
     monkeypatch.setattr(backend._pipeline, "search", fake_search.search)
     backend.sent_prompts = sent
     return backend
+
+
+# ---------------------------------------------------------------- Anu's Q&A agent, with a fake Claude
+
+HAS_QA_AGENT = (REPO_ROOT / "qa_agent" / "agent.py").is_file()
+needs_qa_agent = pytest.mark.skipif(not HAS_QA_AGENT, reason="qa_agent isn't on this branch")
+
+IA2_CHUNK = {"chunk_id": "framework-ia2", "text": "IA-2: Identification and Authentication (Organizational Users)",
+             "source": "NIST_SP-800-53_rev5_catalog.json", "page": None, "type": "framework",
+             "doc_kind": "control_catalog", "locator": "IA-2", "score": 0.81}
+SUGGESTED = "Require MFA for every privileged account, and list the systems and roles in scope."
+
+
+class _Block(types.SimpleNamespace):
+    pass
+
+
+def _qa_turn(stop_reason, content):
+    usage = types.SimpleNamespace(input_tokens=10, output_tokens=5)
+    return types.SimpleNamespace(stop_reason=stop_reason, usage=usage, content=content)
+
+
+@pytest.fixture
+def qa_agent(monkeypatch, tmp_path):
+    """qa_agent.agent with a fake Claude that reads a finding's evidence and proposes wording.
+
+    Everything else is Anu's real code: the tools, the review summary, the
+    citation check and renumbering, and the ask() contract.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    agent = __import__("qa_agent.agent", fromlist=["agent"])
+    retrieval = sys.modules["qa_agent.retrieval"]
+    monkeypatch.setattr(retrieval, "search", lambda query, type=None, top_k=5: [dict(IA2_CHUNK)])
+    monkeypatch.setattr(retrieval, "original_text", lambda chunk_id: "")  # no index: needs the dashboard's cited_text
+    monkeypatch.setattr(agent, "LOG_DB", tmp_path / "chat_log.sqlite3")
+    calls = []
+
+    def create(**kwargs):
+        calls.append({**kwargs, "messages": list(kwargs["messages"])})  # the agent appends to its list later
+        question = kwargs["messages"][-1]["content"]
+        if isinstance(question, list):  # tool results came back: answer, citing the two passages
+            return _qa_turn("end_turn", [_Block(type="text", text=(
+                "The policy says MFA applies only where required [S1], while IA-2 expects it for "
+                "privileged accounts [S2]. I proposed clearer wording."))])
+        tools = {tool["name"]: tool for tool in kwargs["tools"]}
+        if "propose_recommendation" not in tools:
+            return _qa_turn("end_turn", [_Block(type="text", text="No review is loaded.")])
+        ids = tools["propose_recommendation"]["input_schema"]["properties"]["finding_id"]["enum"]
+        target = next((i for i in ids if i in question), ids[0])
+        return _qa_turn("tool_use", [
+            _Block(type="tool_use", id="t1", name="get_finding_evidence", input={"finding_id": target}),
+            _Block(type="tool_use", id="t2", name="propose_recommendation",
+                   input={"finding_id": target, "recommendation": SUGGESTED}),
+        ])
+
+    monkeypatch.setattr(agent, "_client", types.SimpleNamespace(messages=types.SimpleNamespace(create=create)))
+    monkeypatch.setenv("COPILOT_QA_MODULE", "qa_agent.agent:ask")
+    agent.calls = calls
+    return agent

@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from datetime import datetime
 from typing import Any
 
 from .contracts import COVERAGE_VALUES
@@ -17,9 +18,32 @@ from .security import escape_md
 
 NOTICE = (
     "AI agents drafted these findings and recommendations. Every finding in this report "
-    "was approved by the named reviewer, and edited recommendations are marked. "
-    "Rejected findings are not included."
+    "was approved by the named reviewer. Recommendations the reviewer edited, or rewrote with "
+    "the AI assistant's suggested wording, are marked. Rejected findings are not included."
 )
+ORIGIN_NOTES = {
+    "reviewer": "edited by reviewer",
+    "assistant": "AI assistant's wording, accepted by reviewer",
+}
+ACTION_LABELS = {
+    "approved": "Approved",
+    "approved_with_edits": "Approved with edits",
+    "approved_with_ai_suggestion": "Approved with the assistant's wording",
+    "assistant_suggested": "Assistant suggested wording",
+    "rejected": "Rejected",
+    "reopened": "Reopened",
+    "finalized": "Finalized and signed off",
+}
+
+
+def _when(iso: str | None) -> str:
+    """2026-10-08T16:03:22+00:00 -> 2026-10-08 16:03 UTC, for people reading the Markdown."""
+    if not iso:
+        return "unknown time"
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return iso
 SIMULATED_LABEL = "SIMULATED DATA: produced by the dashboard simulator, not a real assessment."
 
 
@@ -77,6 +101,7 @@ def _finding_record(finding) -> dict[str, Any]:
         "clarifying_questions": list(finding.clarifying_questions),
         "recommendation": finding.final_recommendation,
         "recommendation_edited_by_reviewer": finding.recommendation_edited is not None,
+        "recommendation_origin": finding.recommendation_origin,
         "citation": {
             "source": finding.citation.source,
             "locator": finding.citation.locator,
@@ -117,13 +142,15 @@ def to_markdown(report: dict[str, Any]) -> str:
     lines = [f"# {report['title']}", ""]
     if report["simulated"]:
         lines += [f"> **{report['data']}**", ""]
-    version = framework.get("version") or "unknown"
+    title = framework.get("title") or "NIST SP 800-53"
+    version = framework.get("version")
+    framework_line = title if version and version in title else f"{title}, version {version or 'unknown'}"
     lines += [
         f"- **Policy:** {_md(report['policy']['source'])}",
-        f"- **Framework:** {_md(framework.get('title'))}, version {_md(version)}",
-        f"- **Reviewed by:** {_md(review['finalized_by'])}, finalized {review['finalized_at']}",
+        f"- **Framework:** {_md(framework_line)}",
+        f"- **Signed off by:** {_md(review['finalized_by'])}, {_when(review['finalized_at'])}",
         f"- **Decisions:** {review['approved']} approved, {review['rejected']} rejected",
-        f"- **Generated:** {report['generated_at']}",
+        f"- **Generated:** {_when(report['generated_at'])}",
         "",
         f"_{escape_md(report['notice'])}_",
         "",
@@ -147,7 +174,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         for f in findings:
             recommendation = _md(f["recommendation"])
             if f["recommendation_edited_by_reviewer"]:
-                recommendation += " _(edited by reviewer)_"
+                recommendation += f" _({ORIGIN_NOTES.get(f.get('recommendation_origin'), 'edited by reviewer')})_"
             lines.append(
                 f"| {f['id']} | {_md(f['requirement'])} | {f['coverage']} | {_md(f['framework_control'])} "
                 f"| {_md(f['finding'])} | {recommendation} | {_md(_source(f['citation']))} |"
@@ -167,7 +194,7 @@ def to_markdown(report: dict[str, Any]) -> str:
                 lines.append(f"- **AI's original recommendation:** {_md(f.get('recommendation_ai_original'))}")
             lines += [
                 f"- **Source:** {_md(_source(f['citation']))}",
-                f"- **Approved by:** {_md(f['reviewer'])} at {f['reviewed_at']}",
+                f"- **Approved by:** {_md(f['reviewer'])}, {_when(f['reviewed_at'])}",
             ]
             if f["clarifying_questions"]:
                 lines.append(f"- **Questions raised:** {_md(' / '.join(f['clarifying_questions']))}")
@@ -181,10 +208,13 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines += [f"- {_md(s['section'])}: {_md('; '.join(p for p in s['problems'] if p))}" for s in problems]
         lines.append("")
 
-    lines += ["## Audit trail", "", "| Time (UTC) | Reviewer | Action | Finding |", "| --- | --- | --- | --- |"]
+    lines += ["## Audit trail", "", "| Time | Reviewer | Action | Finding |", "| --- | --- | --- | --- |"]
     for event in report["audit_log"]:
+        action = ACTION_LABELS.get(event["action"], event["action"])
+        if event["detail"].get("bulk"):
+            action += " (bulk, Full coverage)"
         lines.append(
-            f"| {event['timestamp']} | {_md(event['reviewer'])} | {event['action']} "
+            f"| {_when(event['timestamp'])} | {_md(event['reviewer'])} | {action} "
             f"| {event['finding_id'] or 'All'} |"
         )
     return "\n".join(lines) + "\n"
@@ -207,7 +237,7 @@ def _csv_cell(value) -> Any:
 
 CSV_COLUMNS = (
     "id", "requirement", "coverage", "framework_control", "finding", "plain_language", "recommendation",
-    "recommendation_edited_by_reviewer", "source", "locator", "page",
+    "recommendation_edited_by_reviewer", "recommendation_origin", "source", "locator", "page",
     "reviewer", "reviewed_at", "reviewer_note", "requirement_text", "clarifying_questions",
 )
 

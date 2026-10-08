@@ -179,3 +179,19 @@ def test_sample_data_is_consistent():
     for control_id in sample_data.CONTROLS:
         assert control_id.split("-")[0] in sample_data.FAMILIES
     json.dumps(sample_data.SAMPLE_POLICIES)  # plain data only
+
+
+def test_simulated_assistant_suggests_wording_for_the_findings_named(sim_backend, sample_session):
+    from phase3_dashboard.core import review
+
+    review.reject(sample_session, "F-003", "Mahsa", "Too vague")
+    context = [{**f.raw, "finding_id": f.finding_id, "status": f.status, "coverage": f.coverage}
+               for f in sample_session.findings]
+    rejected = sim_backend.ask("Suggest better wording for the rejected findings", findings=context)
+    assert [s["finding_id"] for s in rejected["suggestions"]] == ["F-003"]
+    assert rejected["citations"] and rejected["citations"][0]["type"] == "framework"
+    named = sim_backend.ask("Improve the recommendation for F-4 and F-005", findings=context)
+    assert [s["finding_id"] for s in named["suggestions"]] == ["F-004", "F-005"]
+    listing = sim_backend.ask("Which findings have Missing coverage?", findings=context)
+    assert listing["suggestions"] == [] and "F-001" in listing["answer"]
+    assert sim_backend.ask("Suggest better wording", findings=[])["suggestions"] == []

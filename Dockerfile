@@ -11,13 +11,17 @@
 #   docker run -p 8080:8080 -e ANTHROPIC_API_KEY=... compliance-copilot
 #
 # Cloud Run: give the service 4 GiB memory, pass ANTHROPIC_API_KEY from
-# Secret Manager, and for the demo use max instances 1 + session affinity
-# (review decisions live in the running instance's memory).
+# Secret Manager, and for the demo use min and max instances 1 + session
+# affinity (review decisions live in the running instance's memory).
+# Vertex AI later (project quota is 0 for now): set CLAUDE_BACKEND=vertex,
+# ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION=global on the service, give
+# its service account the Vertex AI User role, and unset CHAT_MODEL.
 
 FROM python:3.12-slim
 
 # CHAT_MODEL: the deployed demo's chat runs on Sonnet (the local default is
-# Haiku). A Cloud Run environment variable with the same name overrides it.
+# Haiku). It's an Anthropic API model name; unset it if the service moves to
+# CLAUDE_BACKEND=vertex, where the chat then uses the agents' enabled model.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -63,7 +67,10 @@ RUN useradd --create-home app && chown -R app:app /app
 USER app
 
 EXPOSE 8080
-CMD streamlit run phase3_dashboard/app.py \
+# Start from the dashboard folder so its .streamlit/config.toml (theme, fonts,
+# 10 MB upload limit, hidden error details) and static/ fonts are used.
+WORKDIR /app/phase3_dashboard
+CMD streamlit run app.py \
     --server.port=${PORT} \
     --server.address=0.0.0.0 \
     --server.headless=true \

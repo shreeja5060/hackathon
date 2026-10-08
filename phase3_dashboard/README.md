@@ -3,14 +3,25 @@
 **Owner:** Mahsa
 
 The dashboard is where a person meets the agents' work: upload a policy, run
-the Extractor, Mapper and Auditor, decide on every finding, and export a gap
-report that contains only the findings a named reviewer approved. It also has
-a chat page for questions about the policies and NIST controls.
+the Extractor, Mapper and Auditor, review every finding next to its evidence,
+and sign off a report that contains only the findings a named reviewer
+approved. Anu's Q&A assistant is built in: it answers questions about the
+policies, NIST and the current review, and can suggest stronger wording for a
+finding, which the reviewer still has to accept and approve.
 
-It runs in two modes. **Live** uses the real Phase 1 and Phase 2 code on
-main: Shreeja's agents and LangGraph pipeline, Maryam's chunker and index, and
-Anu's Q&A agent once it's merged. **Simulator** produces the same data format
-from local rules, with no API key, for demos and offline work.
+It runs in two modes. **Live** uses the real code on main: Maryam's index and
+chunker, Shreeja's agents and LangGraph pipeline, and Anu's `qa_agent`.
+**Simulator** produces the same data formats from local rules, with no AI
+calls, for offline work and demos without credentials.
+
+## What a reviewer does
+
+| Page | What happens |
+| --- | --- |
+| **Analyze policy** | Upload a PDF or pick an indexed policy, choose sections in a table, run the agents. Text that looks like prompt injection is flagged. |
+| **Review findings** | A coverage bar and decision progress on top; the review queue on the left; the open finding on the right with the policy quote, plain-language summary, finding, recommendation, reviewer questions and evidence. Approve, edit or reject, and the next open finding opens. Full-coverage findings with no flags can be approved together. **Suggest stronger wording** asks the assistant for a rewrite that waits on the finding until **Use this wording**. |
+| **Signed report** | Locked until sign-off. Then a table of approved findings with where each recommendation's wording came from, the audit trail, and Markdown, JSON and CSV downloads. |
+| **Assistant** | Anu's Q&A agent with numbered sources, question shortcuts, and cards for every suggested rewrite that open the finding in review. |
 
 ## Run it
 
@@ -21,45 +32,56 @@ python3.12 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt    # the team's root file covers every phase
 
-cd phase3_dashboard
-streamlit run app.py
+cd phase3_dashboard                # so .streamlit/config.toml (theme, fonts, limits) loads
+streamlit run app.py               # simulator; add COPILOT_BACKEND=live for real data
 ```
 
-Then:
-
-1. Type your name in the sidebar. Decisions are logged under it.
-2. Pick **Simulator** or **Live pipeline** in the sidebar (see below for Live).
-3. On **Analyze policy**, upload a PDF or choose a loaded policy, then **Run analysis**.
-4. On **Review findings**, approve, edit or reject each finding.
-5. Select **Finalize review**, then download the report from **Export report**.
+Then type your name as the reviewer in the sidebar, analyze a policy, review
+the findings, and select **Finalize review** to unlock the signed report.
 
 In the simulator, the three sample policies cover every state: all four
 coverage values, an unmapped requirement, sections with no requirements, and
-one section with prompt-injection text. **Simulate a failing section** shows
-how a bad model reply is handled.
+one section with prompt-injection text. **Simulator options → Simulate a
+failing section** shows how a bad model reply is handled. The simulated
+assistant can list findings ("Which findings have Missing coverage?") and
+propose wording ("Suggest better wording for the rejected findings").
+
+### Tests
+
+```bash
+python -m pytest phase3_dashboard/tests -q      # from the repo root
+```
+
+91 tests, run by CI on every push (`.github/workflows/phase3-tests.yml`). They
+include headless runs of the whole app and end-to-end runs through the real
+Phase 1 chunker, Phase 2 agents and LangGraph pipeline and Anu's `qa_agent`,
+in the UI too: upload, analyze, ask for wording, use it, approve, sign off.
+Only Claude's replies and the search index are faked, so no key is needed.
 
 ## How it's organized
 
 ```
-app.py               pages: Analyze policy, Review findings, Export report, Ask the docs
+app.py               pages: Analyze policy, Review findings, Signed report, Assistant
 core/
-  contracts.py       checks Phase 2 output and turns it into typed findings
-  review.py          the human-review rules and the audit log
+  contracts.py       checks agent and assistant output and turns it into typed findings
+  review.py          the human-review rules, assistant suggestions and the audit log
   analysis.py        runs sections through the pipeline; resumes them on finalize
   report.py          Markdown, JSON and CSV exports (approved findings only)
   security.py        upload checks, safe rendering, prompt-injection warning
 backends/
-  simulated.py       fake Phase 1 + 2, in the same formats
-  live.py            the real Phase 1 + 2 code (start_review / submit_decisions)
+  simulated.py       fake Phase 1 + 2 and a rule-based assistant, in the same formats
+  live.py            the real code: start_review / submit_decisions, qa_agent.ask
   sample_data.py     invented sample policies and simulated control summaries
-ui/components.py     badges, finding cards, table, chat messages
-tests/               73 tests, including live end-to-end runs
-.streamlit/          theme and server settings
+ui/components.py     header, coverage bar, review queue, finding detail, chat pieces
+static/fonts/        Public Sans and IBM Plex Mono (OFL), served locally
+tests/               91 tests, including live end-to-end runs with the Q&A agent
+.streamlit/          theme, fonts and server settings
 ```
 
 The UI only talks to a backend through one interface, and both backends feed
-the same validation code (`contracts.normalize_pipeline_state`). Switching
-modes changes where the data comes from, not how it's checked or shown.
+the same validation code (`contracts.normalize_pipeline_state`,
+`contracts.normalize_chat_answer`). Switching modes changes where the data
+comes from, not how it's checked or shown.
 
 ## What the simulator mirrors
 
@@ -79,10 +101,22 @@ paraphrases, labeled as such. Every simulated report says so at the top.
 ## Running the live pipeline
 
 1. Use Python 3.12 and `pip install -r requirements.txt` from the repo root.
-2. Put `ANTHROPIC_API_KEY` in `.env` (`cp .env.example .env`). The root `.gitignore` already ignores it.
+2. `cp .env.example .env` and set how the agents reach Claude (the root `.gitignore` ignores `.env`):
+   - **Anthropic API, for now**: `CLAUDE_BACKEND=anthropic` and your own `ANTHROPIC_API_KEY=...`.
+     No key? Use the **Simulator** instead; it needs none.
+   - **Vertex AI, later**: the GCP project's Claude quota is 0 (every call returns 429), so the team
+     isn't using it before the demo. Once the quota is raised: `CLAUDE_BACKEND=vertex`,
+     `ANTHROPIC_VERTEX_PROJECT_ID=uc2-cyber-policy-compliance`, `CLOUD_ML_REGION=global`, and
+     `gcloud auth application-default login` once.
+
+   Check it with `python shared/claude_client.py`, which makes one tiny call.
 3. Build Phase 1's index (see `phase1_ingestion/README.md`) so `data/processed/policy_chunks.json`
    and `chroma_db/` exist. Without it, "Choose a loaded policy" is empty; uploads still work.
-4. Start the app and choose **Live pipeline** in the sidebar, or start it with `COPILOT_BACKEND=live`.
+4. Start the app with `COPILOT_BACKEND=live streamlit run app.py`, or choose **Live pipeline** in the sidebar.
+
+The Phase 2 agents and Anu's Q&A agent both go through `shared/claude_client.py`, so one
+`CLAUDE_BACKEND` setting covers the whole app. On Vertex the chat uses the agents' model unless
+`CHAT_MODEL` is set to a Vertex model ID enabled in the project.
 
 The sidebar shows which retriever Phase 2 is really using. `pipeline.py`
 quietly falls back to `shared/fake_search.py` when Phase 1's retriever can't
@@ -100,7 +134,9 @@ requirement, so analyze a few sections first.
 | `COPILOT_BACKEND` | `simulated` | `simulated` or `live` at startup |
 | `COPILOT_SIM_DELAY` | `0.3` | Seconds per section in the simulator |
 | `COPILOT_QA_MODULE` | `qa_agent.agent:ask` if present | Which Q&A function the chat uses. Without one, live chat shows search results only |
-| `ANTHROPIC_API_KEY` | none | Used by the Phase 2 agents and the Q&A agent, never by the dashboard itself |
+| `CLAUDE_BACKEND` | `anthropic` | `vertex` or `anthropic`, for the agents and the Q&A assistant |
+| `CHAT_MODEL` | Haiku 4.5 (Anthropic API), the agents' model (Vertex) | Model for the Q&A assistant |
+| `ANTHROPIC_API_KEY` | none | Only with `CLAUDE_BACKEND=anthropic`; the dashboard itself never uses it |
 
 ## The contract with Phase 2
 
@@ -153,7 +189,9 @@ These are enforced in `core/`, not just in the UI.
 - Findings that fail validation (unknown coverage, missing citation) can be rejected but not approved.
 - Results are only accepted from a pipeline that paused for review.
 - Finalizing requires a decision on every finding, then locks the review. The report contains approved findings only, with the full audit trail.
-- Document and model text is escaped before display, so it can't render links, images, HTML or tables. Nothing uses `unsafe_allow_html`.
+- The assistant's suggested wording never changes a finding. It waits until the reviewer selects **Use this wording** and approves; the audit trail records the suggestion and whether it was accepted as is or edited, and the report marks each recommendation's origin. A suggestion for an already-decided finding needs the reviewer to reopen it first. Suggestions naming findings that aren't in the review are dropped.
+- Bulk approval covers only Full-coverage findings with no flags or validation problems; each approval is logged separately and marked as bulk.
+- Document and model text is escaped before display, so it can't render links, images, HTML or tables. Nothing uses `unsafe_allow_html`; the only raw HTML is the coverage bar, built from counts and fixed labels.
 - Uploads must be real PDFs with selectable text, at most 10 MB and 80 pages, not password-protected. They're read in memory, never saved.
 - Policy text that looks like instructions to an AI triggers a warning for the reviewer.
 - CSV cells that would run as spreadsheet formulas are neutralized.
@@ -170,7 +208,7 @@ Still open:
 2. **Two frameworks in one search.** `type="framework"` covers NIST CSF 2.0 as well as SP 800-53, so the Mapper may pick CSF outcomes. A framework filter would let the dashboard's framework selector drive it.
 3. **Silent placeholder search.** `pipeline.py` falls back to `fake_search` without failing. The dashboard warns, but a demo machine should have the real index.
 4. **Reviewer details.** `submit_decisions()` records approve/reject and edits, but not who decided or why. The dashboard keeps that in its audit trail; the pipeline could store it too.
-5. **Two dashboards.** `phase3-anu` has its own `phase3_dashboard/app.py`, which would conflict with this one in main. Anu's Q&A agent (`chat-anu`) already plugs into this dashboard's chat once merged.
+5. **Suggestions one finding at a time.** The assistant can propose wording for several findings in one answer, but each is accepted and approved individually, on purpose.
 
 ## Adding features
 
@@ -180,8 +218,16 @@ Still open:
 - **A new field from the agents:** shows automatically under Other fields. To give it a proper place, add it to `Finding` in `core/contracts.py`.
 - **Theme and upload limits:** `.streamlit/config.toml`.
 
-## Deploying later
+## Deploying on Cloud Run
 
-The app is a single Streamlit process, so it can run in a container on
-Cloud Run in the team's Google Cloud project when it's time to host the demo.
-The API key would go in Secret Manager, not in the image.
+The root `Dockerfile` builds the index into the image and starts this
+dashboard from its folder (so the theme, fonts and limits load) in live mode
+with the Q&A agent. On the Cloud Run service pass `ANTHROPIC_API_KEY` from
+Secret Manager (the default `CLAUDE_BACKEND=anthropic`), and give it 4 GiB of
+memory, min and max instances 1 and session affinity, since review decisions
+live in the running instance's memory. When the project's Vertex quota is
+raised, switch with `CLAUDE_BACKEND=vertex`,
+`ANTHROPIC_VERTEX_PROJECT_ID=uc2-cyber-policy-compliance` and
+`CLOUD_ML_REGION=global` (service account: Vertex AI User role), and unset
+`CHAT_MODEL`.
+

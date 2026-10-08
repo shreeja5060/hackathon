@@ -25,7 +25,7 @@ def test_upload_names_are_sanitized():
     ("policy.pdf", b""),
     ("policy.pdf", b"MZ\x90\x00 this is an executable"),
     ("policy.pdf", b"%PDF-" + b"0" * security.MAX_UPLOAD_BYTES),
-])
+], ids=["wrong-extension", "empty", "not-a-pdf", "too-large"])  # short IDs: the 10 MB value broke Windows
 def test_bad_uploads_are_rejected(name, data):
     with pytest.raises(UploadRejected):
         check_upload(name, data)

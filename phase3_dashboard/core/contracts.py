@@ -37,11 +37,18 @@ KNOWN_FINDING_FIELDS = frozenset({
 })
 MAX_FIELD_CHARS = 4000
 MAX_QUESTIONS = 5
+MAX_SUGGESTION_CHARS = 2000
+MAX_SUGGESTIONS = 10
 _NO_RECOMMENDATION = frozenset({"", "none", "n/a", "na", "null", "-", "—"})
 _CONTROL_ID = re.compile(
     r"^(?:[A-Z]{2}-\d{1,2}(?:\(\d{1,2}\))?"  # SP 800-53, e.g. AC-2 or IA-2(1)
     r"|[A-Z]{2}\.[A-Z]{2}-\d{2})$"  # CSF 2.0, e.g. PR.AA-01
 )
+
+
+def is_control_id(value) -> bool:
+    """True for SP 800-53 (AC-2, IA-2(1)) and CSF 2.0 (PR.AA-01) identifiers."""
+    return isinstance(value, str) and bool(_CONTROL_ID.match(value))
 
 
 class ContractError(ValueError):
@@ -91,6 +98,8 @@ class Finding:
     reviewed_at: str | None = None
     reviewer_note: str = ""
     recommendation_edited: str | None = None
+    recommendation_origin: str | None = None  # "reviewer" or "assistant" when the approved text isn't the agents'
+    assistant_suggestion: str | None = None  # latest wording the Q&A assistant proposed; never applied by itself
 
     @property
     def approvable(self) -> bool:
@@ -150,8 +159,10 @@ class AnalysisRun:
 @dataclass(frozen=True)
 class ChatAnswer:
     answer: str
-    citations: tuple[dict[str, Any], ...]
+    citations: tuple[dict[str, Any], ...]  # each carries "ref": its [n] number in the answer
     dropped_citations: int = 0
+    suggestions: tuple[dict[str, str], ...] = ()  # {"finding_id", "recommendation"}
+    dropped_suggestions: int = 0
 
 
 # --------------------------------------------------------------------- helpers
@@ -407,8 +418,33 @@ def validate_search_result(item) -> dict | None:
     return item
 
 
-def normalize_chat_answer(payload) -> ChatAnswer:
-    """Validate a Q&A reply: {"answer": str, "citations": [search() results]}."""
+def _clean_suggestions(raw, known_finding_ids) -> tuple[list[dict], int]:
+    """Keep well-formed suggestions for findings that exist, one per finding."""
+    if not isinstance(raw, list):
+        return [], 0
+    clean, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        finding_id, text = item.get("finding_id"), item.get("recommendation")
+        if not isinstance(finding_id, str) or not isinstance(text, str) or not text.strip():
+            continue
+        if known_finding_ids is not None and finding_id not in known_finding_ids:
+            continue
+        if finding_id in seen or len(clean) == MAX_SUGGESTIONS:
+            continue
+        seen.add(finding_id)
+        clean.append({"finding_id": finding_id, "recommendation": " ".join(text.split())[:MAX_SUGGESTION_CHARS]})
+    return clean, len(raw) - len(clean)
+
+
+def normalize_chat_answer(payload, known_finding_ids=None) -> ChatAnswer:
+    """Validate a Q&A reply: {"answer": str, "citations": [search() results], "suggestions": [...]}.
+
+    Each kept citation gets "ref", its position in the agent's list, so the
+    answer's [1], [2] markers still point at the right source if a malformed
+    citation is dropped. Suggestions are kept only for findings in the review.
+    """
     if not isinstance(payload, dict):
         raise ContractError("The Q&A agent returned an unexpected format.")
     answer = payload.get("answer")
@@ -417,9 +453,16 @@ def normalize_chat_answer(payload) -> ChatAnswer:
     raw = payload.get("citations") or []
     if not isinstance(raw, list):
         raw = []
-    clean = [c for c in (validate_search_result(item) for item in raw) if c is not None]
+    clean = []
+    for ref, item in enumerate(raw, start=1):
+        citation = validate_search_result(item)
+        if citation is not None:
+            clean.append({**citation, "ref": ref})
+    suggestions, dropped = _clean_suggestions(payload.get("suggestions") or [], known_finding_ids)
     return ChatAnswer(
         answer=answer.strip()[:MAX_FIELD_CHARS],
         citations=tuple(clean),
         dropped_citations=len(raw) - len(clean),
+        suggestions=tuple(suggestions),
+        dropped_suggestions=dropped,
     )

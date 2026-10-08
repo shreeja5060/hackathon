@@ -41,8 +41,16 @@ from qa_agent import retrieval
 
 load_dotenv(retrieval.REPO_ROOT / ".env")
 
+# Same switch as the Phase 2 agents: CLAUDE_BACKEND=anthropic (API key) or
+# vertex (Claude on Vertex AI in the GCP project, no key).
+sys.path.append(str(retrieval.REPO_ROOT / "shared"))
+import claude_client  # noqa: E402
+
 # Haiku while developing; set CHAT_MODEL (e.g. claude-sonnet-5-5) for the demo.
-MODEL = os.getenv("CHAT_MODEL", "claude-haiku-4-5")
+# On Vertex AI, model IDs carry a version suffix and must be enabled in the
+# project, so the chat uses the agents' model there unless CHAT_MODEL is set.
+MODEL = os.getenv("CHAT_MODEL") or (
+    claude_client.MODEL if claude_client.BACKEND == "vertex" else "claude-haiku-4-5")
 MAX_TOOL_ROUNDS = 6
 MAX_PASSAGE_CHARS = 2500
 MAX_FINDINGS_IN_CONTEXT = 80
@@ -147,10 +155,10 @@ def _propose_tool(ids: list[str]) -> dict:
 _client = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client():
     global _client
     if _client is None:
-        _client = anthropic.Anthropic()
+        _client = claude_client.make_client()  # Anthropic or AnthropicVertex, same messages API
     return _client
 
 

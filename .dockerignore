@@ -1,0 +1,22 @@
+# Secrets: the API key comes from Secret Manager at runtime, never the image.
+.env
+*.key
+
+# Local environments and caches
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Generated locally; the image builds its own index.
+chroma_db/
+data/processed/
+data/frameworks/*.json
+*.sqlite3
+*.db
+*.log
+
+.git/

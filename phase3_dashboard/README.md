@@ -101,18 +101,15 @@ paraphrases, labeled as such. Every simulated report says so at the top.
 ## Running the live pipeline
 
 1. Use Python 3.12 and `pip install -r requirements.txt` from the repo root.
-2. `cp .env.example .env` and choose how the agents reach Claude (the root `.gitignore` ignores `.env`):
-   - **Vertex AI** (the team's official route, billed to the GCP project, no key):
-     ```
-     CLAUDE_BACKEND=vertex
-     ANTHROPIC_VERTEX_PROJECT_ID=uc2-cyber-policy-compliance
-     CLOUD_ML_REGION=global
-     ```
-     then run `gcloud auth application-default login` once (Cloud Shell and Cloud Run do this for you).
-   - **Anthropic API**: `CLAUDE_BACKEND=anthropic` and `ANTHROPIC_API_KEY=...`.
+2. `cp .env.example .env` and set how the agents reach Claude (the root `.gitignore` ignores `.env`):
+   - **Anthropic API, for now**: `CLAUDE_BACKEND=anthropic` and your own `ANTHROPIC_API_KEY=...`.
+     No key? Use the **Simulator** instead; it needs none.
+   - **Vertex AI, later**: the GCP project's Claude quota is 0 (every call returns 429), so the team
+     isn't using it before the demo. Once the quota is raised: `CLAUDE_BACKEND=vertex`,
+     `ANTHROPIC_VERTEX_PROJECT_ID=uc2-cyber-policy-compliance`, `CLOUD_ML_REGION=global`, and
+     `gcloud auth application-default login` once.
 
-   Check it with `python shared/claude_client.py`, which makes one tiny call. A 429 on Vertex means the
-   project's Claude quota hasn't been raised yet.
+   Check it with `python shared/claude_client.py`, which makes one tiny call.
 3. Build Phase 1's index (see `phase1_ingestion/README.md`) so `data/processed/policy_chunks.json`
    and `chroma_db/` exist. Without it, "Choose a loaded policy" is empty; uploads still work.
 4. Start the app with `COPILOT_BACKEND=live streamlit run app.py`, or choose **Live pipeline** in the sidebar.
@@ -225,9 +222,12 @@ Still open:
 
 The root `Dockerfile` builds the index into the image and starts this
 dashboard from its folder (so the theme, fonts and limits load) in live mode
-with the Q&A agent. On the Cloud Run service set `CLAUDE_BACKEND=vertex`,
+with the Q&A agent. On the Cloud Run service pass `ANTHROPIC_API_KEY` from
+Secret Manager (the default `CLAUDE_BACKEND=anthropic`), and give it 4 GiB of
+memory, min and max instances 1 and session affinity, since review decisions
+live in the running instance's memory. When the project's Vertex quota is
+raised, switch with `CLAUDE_BACKEND=vertex`,
 `ANTHROPIC_VERTEX_PROJECT_ID=uc2-cyber-policy-compliance` and
-`CLOUD_ML_REGION=global` (the service account needs the Vertex AI User
-role), 4 GiB of memory, min and max instances 1 and session affinity, since
-review decisions live in the running instance's memory.
+`CLOUD_ML_REGION=global` (service account: Vertex AI User role), and unset
+`CHAT_MODEL`.
 

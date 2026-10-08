@@ -10,24 +10,26 @@
 #   docker build -t compliance-copilot .
 #   docker run -p 8080:8080 -e ANTHROPIC_API_KEY=... compliance-copilot
 #
-# Cloud Run: give the service 4 GiB memory and, for the demo, min and max
-# instances 1 + session affinity (review decisions live in the running
-# instance's memory). Claude: set CLAUDE_BACKEND=vertex,
-# ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION=global on the service (its
-# service account needs the Vertex AI User role; no key), or pass
-# ANTHROPIC_API_KEY from Secret Manager with CLAUDE_BACKEND=anthropic.
+# Cloud Run: give the service 4 GiB memory, pass ANTHROPIC_API_KEY from
+# Secret Manager, and for the demo use min and max instances 1 + session
+# affinity (review decisions live in the running instance's memory).
+# Vertex AI later (project quota is 0 for now): set CLAUDE_BACKEND=vertex,
+# ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION=global on the service, give
+# its service account the Vertex AI User role, and unset CHAT_MODEL.
 
 FROM python:3.12-slim
 
-# CHAT_MODEL isn't set here: on Vertex the chat uses the agents' enabled model.
-# With CLAUDE_BACKEND=anthropic, set CHAT_MODEL=claude-sonnet-5-5 on the service.
+# CHAT_MODEL: the deployed demo's chat runs on Sonnet (the local default is
+# Haiku). It's an Anthropic API model name; unset it if the service moves to
+# CLAUDE_BACKEND=vertex, where the chat then uses the agents' enabled model.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/app/.cache/huggingface \
     PORT=8080 \
     COPILOT_BACKEND=live \
-    COPILOT_QA_MODULE=qa_agent.agent:ask
+    COPILOT_QA_MODULE=qa_agent.agent:ask \
+    CHAT_MODEL=claude-sonnet-5-5
 
 WORKDIR /app
 

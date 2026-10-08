@@ -1,0 +1,27 @@
+name: Phase 3 tests
+
+# Runs the dashboard tests on every push and pull request, including an
+# end-to-end run through the real Phase 2 agents and LangGraph pipeline with
+# a fake Claude client. No API key or credit is needed. Phase 1's heavy
+# dependencies (torch, chromadb) aren't installed: the agents fall back to
+# shared/fake_search.py, exactly as Phase 2's own CI does.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install anthropic python-dotenv pytest langgraph "streamlit>=1.64.0" "pandas>=2.2.0" pymupdf
+
+      - run: pytest phase3_dashboard/tests -v
+        env:
+          ANTHROPIC_API_KEY: ci-dummy-key-not-real

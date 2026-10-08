@@ -1,0 +1,28 @@
+name: Phase 2 tests
+
+# Runs the Phase 2 unit tests on every push and pull request. These tests use
+# a fake Claude client, so no API key or credit is needed, and they run in
+# under a minute. A red X here means a change broke the agents' contract
+# (schema, citations, error handling) before it reached main.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only what the tests need. Phase 1's heavy deps (torch, chromadb) are
+      # not required: the agents fall back to shared/fake_search.py.
+      - run: pip install anthropic python-dotenv pytest langgraph
+
+      - run: pytest tests/ -v
+        env:
+          ANTHROPIC_API_KEY: ci-dummy-key-not-real

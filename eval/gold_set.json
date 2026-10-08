@@ -1,0 +1,167 @@
+[
+  {
+    "id": "G01",
+    "requirement_text": "Accounts are assigned to individuals and must not be shared unless an approved technical or business process explicitly permits it.",
+    "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+    "locator": "Section 3.2 Accounts and security controls",
+    "hint_control": "AC-2 (see AC-2(9) shared/group accounts)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G02",
+    "requirement_text": "Users are responsible for activity performed with their credentials and must protect authentication information from unauthorized disclosure.",
+    "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+    "locator": "Section 3.2 Accounts and security controls",
+    "hint_control": "IA-5 (Authenticator Management)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G03",
+    "requirement_text": "Users must not disable, alter, evade, or interfere with security, monitoring, logging, filtering, encryption, or configuration controls.",
+    "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+    "locator": "Section 3.2 Accounts and security controls",
+    "hint_control": "CM-5 (Access Restrictions for Change) or AU-9 (Protection of Audit Information)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G04",
+    "requirement_text": "Users must secure unattended devices by locking the screen or signing out and must follow approved session-security settings.",
+    "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
+    "locator": "Section 3.2 Accounts and security controls",
+    "hint_control": "AC-11 (Device Lock)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G05",
+    "requirement_text": "Passwords, passphrases, tokens, biometric factors, and other authenticators must not be shared.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.5 Authentication",
+    "hint_control": "IA-5 (Authenticator Management)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G06",
+    "requirement_text": "Users must comply with current organizational authentication requirements, including multifactor authentication where required.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.5 Authentication",
+    "hint_control": "IA-2 (Identification and Authentication); see IA-2(1)/(2) for MFA",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G07",
+    "requirement_text": "Suspected credential compromise must be reported immediately and the affected credential must be changed or revoked through an approved process.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.5 Authentication",
+    "hint_control": "IA-5 (compromised authenticators) or IR-6 (Incident Reporting)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G08",
+    "requirement_text": "Endpoints must use an approved operating system and a configuration managed by the organization.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.1 Managed configuration",
+    "hint_control": "CM-6 (Configuration Settings) or CM-2 (Baseline Configuration)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G09",
+    "requirement_text": "Users must not remove, disable, or modify approved endpoint protection, logging, patching, update, device-control, sharing, authentication, or other security settings unless specifically authorized.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.1 Managed configuration",
+    "hint_control": "CM-5 (Access Restrictions for Change)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G10",
+    "requirement_text": "Security updates and configuration changes must be applied through approved management processes.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.1 Managed configuration",
+    "hint_control": "SI-2 (Flaw Remediation)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G11",
+    "requirement_text": "Do not bypass malware scanning, data-loss prevention, encryption, content filtering, or other protective controls.",
+    "source": "Public_Release_Internet_Email_Acceptable_Use_Policy.pdf",
+    "locator": "Section 4 Email and electronic communications",
+    "hint_control": "SI-3 (Malicious Code Protection); DLP ~ AC-4; encryption ~ SC-8",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G12",
+    "requirement_text": "Sensitive or confidential information may be sent only to authorized recipients using approved protection methods.",
+    "source": "Public_Release_Internet_Email_Acceptable_Use_Policy.pdf",
+    "locator": "Section 4 Email and electronic communications",
+    "hint_control": "AC-21 (Information Sharing) or SC-8 (Transmission Confidentiality)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G13",
+    "requirement_text": "Organizational data must be stored in approved locations that provide appropriate access control, resilience, backup, and recovery.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.3 Data storage, transfer, and backup",
+    "hint_control": "CP-9 (System Backup) or SC-28 (Protection of Information at Rest)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G14",
+    "requirement_text": "Lost or stolen devices and suspected data loss must be reported promptly through approved reporting channels.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.6 Loss prevention and incident reporting",
+    "hint_control": "IR-6 (Incident Reporting)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  },
+  {
+    "id": "G15",
+    "requirement_text": "Removable media and external storage may be used only when authorized and protected according to organizational requirements.",
+    "source": "Public_Release_Computer_Security_Policy.pdf",
+    "locator": "Section 3.4 Removable and external media",
+    "hint_control": "MP-7 (Media Use)",
+    "expected_control": "",
+    "acceptable_controls": [],
+    "expected_coverage": "",
+    "notes": ""
+  }
+]

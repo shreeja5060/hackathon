@@ -7,15 +7,15 @@ which exposes the same search() signature. Everyone else (Phase 2 agents, the
 chat box, the dashboard) should code against this interface now so nothing
 has to change when the swap happens.
 
-Schema (agreed 2026-09-25, credit Maryam):
+Schema (agreed with the team, confirmed against Maryam's real retriever
+2026-10-02): type is one of "internal" | "framework" | "evidence" | None.
     {
-        "chunk_id": str,   # unique id for this chunk, used to cite exact evidence
-        "text": str,        # the chunk's text content
-        "source": str,      # source file name
-        "type": str,        # "policy" | "framework" | "config" | "log" | "inventory"
-        "page": int | None, # page number, for PDFs
-        "locator": str | None,  # finer reference: policy section, NIST control ID,
-                                 # JSON path, or log event reference
+        "chunk_id": str,
+        "text": str,
+        "source": str,
+        "type": str,       # "internal" | "framework" | "evidence"
+        "page": int | None,
+        "locator": str | None,
     }
 """
 
@@ -29,7 +29,7 @@ _FAKE_CHUNKS = [
             "requirements, including multifactor authentication where required."
         ),
         "source": "Public_Release_Computer_Security_Policy.pdf",
-        "type": "policy",
+        "type": "internal",
         "page": 2,
         "locator": "Section 3.5 Authentication",
     },
@@ -40,7 +40,7 @@ _FAKE_CHUNKS = [
             "an approved technical or business process explicitly permits it."
         ),
         "source": "Public_Release_Computer_Acceptable_Use_Policy.pdf",
-        "type": "policy",
+        "type": "internal",
         "page": 1,
         "locator": "Section 3.2 Accounts and security controls",
     },
@@ -51,7 +51,7 @@ _FAKE_CHUNKS = [
             "provide appropriate access control, resilience, backup, and recovery."
         ),
         "source": "Public_Release_Computer_Security_Policy.pdf",
-        "type": "policy",
+        "type": "internal",
         "page": 1,
         "locator": "Section 3.3 Data storage, transfer, and backup",
     },
@@ -84,17 +84,9 @@ _FAKE_CHUNKS = [
 
 def search(query: str, type: Optional[str] = None, top_k: int = 5) -> list[dict]:
     """
-    Placeholder retriever. Ignores the actual query text and does a naive
-    keyword-ish filter so callers get *something* plausible to build against.
-    Replace with the real Chroma-backed retriever from phase1_ingestion/.
-
-    Args:
-        query: the search text (not semantically used here, just a stand-in)
-        type: optional filter, one of "policy" | "framework" | "config" | "log" | "inventory"
-        top_k: max number of results
-
-    Returns:
-        A list of chunk dicts matching the agreed schema above.
+    Placeholder retriever, matching Maryam's real search() signature:
+    search(query, type=None, top_k=5). type must be "internal", "framework",
+    "evidence", or None.
     """
     results = _FAKE_CHUNKS
     if type is not None:
@@ -107,7 +99,19 @@ def search(query: str, type: Optional[str] = None, top_k: int = 5) -> list[dict]
     return ranked[:top_k]
 
 
+def get_original_chunk(chunk_id: str) -> Optional[dict]:
+    """
+    Fetch one exact chunk by its chunk_id, no search involved. This is what
+    the Auditor uses to retrieve the EXACT control chunk the Mapper matched,
+    rather than searching again (which could theoretically return something
+    different). Returns None if no chunk with that id exists.
+    """
+    for chunk in _FAKE_CHUNKS:
+        if chunk["chunk_id"] == chunk_id:
+            return chunk
+    return None
+
+
 if __name__ == "__main__":
     import json
-
     print(json.dumps(search("multifactor authentication"), indent=2))

@@ -1,0 +1,27 @@
+# Streamlit settings for the dashboard. Streamlit reads this file when you
+# start the app from the phase3_dashboard folder:  streamlit run app.py
+
+[server]
+# Upload limit in MB. The app also checks file type, size and page count itself.
+maxUploadSize = 10
+enableXsrfProtection = true
+
+[client]
+# The browser shows only the error type; the full traceback prints in the
+# terminal (PyCharm's Run window). Use "full" while debugging if you prefer.
+showErrorDetails = "type"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# A quiet "audit ledger" palette: cool paper, slate ink, steel-teal actions.
+# Color is saved for the coverage badges, which carry the meaning.
+base = "light"
+primaryColor = "#24607A"
+backgroundColor = "#F5F7F6"
+secondaryBackgroundColor = "#E6ECEA"
+textColor = "#1B2830"
+linkColor = "#24607A"
+borderColor = "#C9D3CF"
+baseRadius = "small"

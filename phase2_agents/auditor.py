@@ -106,7 +106,26 @@ def audit_requirement(mapped_requirement: dict) -> dict:
     # second search returning a different or no result (per Maryam's note).
     control_chunk_id = mapped_requirement.get("mapped_control_chunk_id")
     control_chunk = get_original_chunk(control_chunk_id) if control_chunk_id else None
-    control_text = control_chunk["text"] if control_chunk else "Unknown control text"
+    if not control_chunk:
+        # We know which control was meant but cannot read its text. Asking Claude
+        # to judge against nothing produces a meaningless finding, so say so.
+        return {
+            "requirement": mapped_requirement["requirement"],
+            "coverage": "Not observable",
+            "finding": f"The text of control {control_id} could not be retrieved, so this requirement was not judged against it.",
+            "recommendation": "Re-run the analysis. If it happens again, check that the framework index is intact.",
+            "plain_language": "The system picked a rule to compare against but could not load that rule's "
+                              "text, so it did not guess. A person should check this one.",
+            "clarifying_questions": [],
+            "citation": {
+                "chunk_id": mapped_requirement["chunk_id"],
+                "source": mapped_requirement["source"],
+                "locator": mapped_requirement["locator"],
+            },
+            "framework_control": control_id,
+            "status": "pending"
+        }
+    control_text = control_chunk["text"]
 
     prompt = AUDITOR_PROMPT.format(
         requirement_text=mapped_requirement["requirement_text"],

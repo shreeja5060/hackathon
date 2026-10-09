@@ -101,7 +101,9 @@ def test_mapper_handles_no_match(fake_claude):
     assert out["mapped_control_chunk_id"] is None
 
 
-def test_mapper_asks_for_15_candidates(fake_claude, monkeypatch):
+def test_mapper_fetches_extra_candidates_before_trimming(fake_claude, monkeypatch):
+    # It asks for more than it shows, because other frameworks and repeated
+    # fragments are dropped before the shortlist of 15 is built.
     seen = {}
     def fake_search(query, type=None, top_k=5):
         seen["top_k"] = top_k
@@ -110,7 +112,7 @@ def test_mapper_asks_for_15_candidates(fake_claude, monkeypatch):
     fake_claude(mapper, json.dumps({"control_id": None, "reasoning": ""}))
     mapper.map_requirement({"requirement": "r", "requirement_text": "t",
                             "source": "s", "chunk_id": "c", "locator": "l"})
-    assert seen["top_k"] == 15
+    assert seen["top_k"] >= 15
 
 
 # ---------- Auditor ----------

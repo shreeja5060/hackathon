@@ -4,6 +4,10 @@ One place that decides how the agents talk to Claude.
     CLAUDE_BACKEND=anthropic   (default)  -> api.anthropic.com with ANTHROPIC_API_KEY
     CLAUDE_BACKEND=vertex                 -> Claude on Google Cloud Vertex AI, billed to
                                              the GCP project, no Anthropic key needed
+    CLAUDE_BACKEND=gemini                 -> Gemini on Vertex AI (shared/gemini_client.py),
+                                             billed to the GCP project. Needs GEMINI_MODEL.
+                                             Covers the three agents only, not the chat
+                                             agent (it needs Claude's tool use).
 
 Every agent does `from claude_client import client, MODEL` and calls
 `client.messages.create(model=MODEL, ...)`. The call signature is identical
@@ -37,6 +41,21 @@ if BACKEND == "vertex":
 
     def make_client():
         return AnthropicVertex(project_id=PROJECT_ID, region=REGION)
+elif BACKEND == "gemini":
+    from gemini_client import GeminiClient
+
+    PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+    REGION = os.getenv("GEMINI_LOCATION", "global")
+    MODEL = os.getenv("GEMINI_MODEL")
+    if not PROJECT_ID:
+        raise RuntimeError("CLAUDE_BACKEND=gemini but GOOGLE_CLOUD_PROJECT is not set")
+    if not MODEL:
+        raise RuntimeError("CLAUDE_BACKEND=gemini but GEMINI_MODEL is not set "
+                           "(take the model id from Model Garden in the GCP console)")
+    DESCRIPTION = f"gemini ({PROJECT_ID}, {REGION}, {MODEL})"
+
+    def make_client():
+        return GeminiClient(PROJECT_ID, REGION)
 else:
     from anthropic import Anthropic
 

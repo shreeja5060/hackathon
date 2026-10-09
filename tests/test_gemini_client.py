@@ -112,8 +112,9 @@ def test_global_and_regional_urls():
 
 
 class _Resp:
-    def __init__(self, status, payload):
+    def __init__(self, status, payload, headers=None):
         self.status_code, self._payload, self.text = status, payload, json.dumps(payload)
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -163,3 +164,58 @@ def test_backend_is_chosen_by_environment_and_needs_a_model(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(claude_client)
+
+
+def _always(monkeypatch, status, headers=None):
+    requests = pytest.importorskip("requests")
+    sent, sleeps = [], []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: sent.append(1) or _Resp(status, {"error": {"message": "busy"}}, headers))
+    monkeypatch.setattr(gc.time, "sleep", lambda s: sleeps.append(s))
+    return sent, sleeps
+
+
+def test_waits_grow_and_are_capped_when_google_keeps_saying_busy(monkeypatch):
+    sent, sleeps = _always(monkeypatch, 429)
+    client = GeminiClient("proj", retries=6)
+    monkeypatch.setattr(client, "_headers", lambda: {})
+    with pytest.raises(GeminiError, match="429"):
+        client.messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "x"}])
+    assert len(sent) == 7                                   # 1 try + 6 retries, then it gives up
+    assert sleeps == [5, 10, 20, 40, 60, 60]
+
+
+def test_googles_retry_after_is_honoured(monkeypatch):
+    sent, sleeps = _always(monkeypatch, 429, {"Retry-After": "7"})
+    client = GeminiClient("proj", retries=2)
+    monkeypatch.setattr(client, "_headers", lambda: {})
+    with pytest.raises(GeminiError):
+        client.messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "x"}])
+    assert sleeps == [7.0, 7.0]
+
+
+def test_a_real_error_is_not_retried(monkeypatch):
+    sent, sleeps = _always(monkeypatch, 404)
+    client = GeminiClient("proj", retries=6)
+    monkeypatch.setattr(client, "_headers", lambda: {})
+    with pytest.raises(GeminiError, match="404"):
+        client.messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "x"}])
+    assert len(sent) == 1 and sleeps == []
+
+
+def test_calls_can_be_spaced_out(monkeypatch):
+    requests = pytest.importorskip("requests")
+    sleeps = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(200, _reply("ok")))
+    monkeypatch.setattr(gc.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(gc.time, "monotonic", lambda: 100.0)
+    monkeypatch.setenv("GEMINI_MIN_INTERVAL", "3")
+    client = GeminiClient("proj")
+    monkeypatch.setattr(client, "_headers", lambda: {})
+    for _ in range(2):
+        client.messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "x"}])
+    assert sleeps == [3.0]                                  # the first call is free, the second waits
+
+
+def test_retry_count_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("GEMINI_RETRIES", "3")
+    assert GeminiClient("proj").retries == 3

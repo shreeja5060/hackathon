@@ -19,6 +19,13 @@ Settings (all optional, read from the environment):
   GEMINI_TOKEN_FACTOR     default 8     output limit = max_tokens * factor ...
   GEMINI_TOKEN_FLOOR      default 1024  ... but never below this
   GEMINI_THINKING_BUDGET  unset         set (e.g. 0) only if the model supports it
+  GEMINI_RETRIES          default 6     how many times to retry a rate-limited (429) or busy call
+  GEMINI_MIN_INTERVAL     default 0     minimum seconds between calls; 3 keeps a long run under most limits
+
+Rate limits: Gemini has a per-minute quota too. When Google says "resource exhausted"
+(429) the client waits and retries, honouring the Retry-After header if there is one and
+otherwise waiting 5, 10, 20, 40, then 60 seconds. For a long batch run, GEMINI_MIN_INTERVAL
+spaces the calls out so most of those waits never happen.
 
 Why the token factor: Gemini's "thinking" models count their hidden reasoning
 against the output limit. The agents ask for small limits (20, 300, 1000) that
@@ -117,11 +124,13 @@ class _Messages:
 class GeminiClient:
     """Drop-in for the part of the Anthropic client the agents use: `.messages.create(...)`."""
 
-    def __init__(self, project_id: str, location: str = "global", timeout: float = 120, retries: int = 2):
+    def __init__(self, project_id: str, location: str = "global", timeout: float = 120, retries=None):
         self.project_id = project_id
         self.location = location
         self.timeout = timeout
-        self.retries = retries
+        self.retries = int(os.getenv("GEMINI_RETRIES", "6")) if retries is None else retries
+        self.min_interval = float(os.getenv("GEMINI_MIN_INTERVAL", "0"))
+        self._last_call = float("-inf")
         self.temperature = float(os.getenv("GEMINI_TEMPERATURE", "0.2"))
         self.token_factor = int(os.getenv("GEMINI_TOKEN_FACTOR", "8"))
         self.token_floor = int(os.getenv("GEMINI_TOKEN_FLOOR", "1024"))
@@ -145,15 +154,40 @@ class GeminiClient:
             self._creds.refresh(Request())
         return {"Authorization": f"Bearer {self._creds.token}", "Content-Type": "application/json"}
 
+    def _pace(self):
+        """Keep at least min_interval seconds between calls (off by default)."""
+        if self.min_interval <= 0:
+            return
+        wait = self._last_call + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+
+    @staticmethod
+    def _wait_seconds(response, attempt: int) -> float:
+        """How long to wait before retrying: Google's Retry-After if given, else 5, 10, 20, 40, 60, 60..."""
+        header = None
+        try:
+            header = response.headers.get("Retry-After")
+        except Exception:
+            pass
+        if header:
+            try:
+                return min(float(header), 90.0)
+            except ValueError:
+                pass
+        return float(min(5 * (2 ** attempt), 60))
+
     def _generate(self, model: str, body: dict) -> dict:
         import requests
         response = None
         for attempt in range(self.retries + 1):
+            self._pace()
             response = requests.post(self._url(model), json=body, headers=self._headers(), timeout=self.timeout)
             if response.status_code == 200:
                 return response.json()
             if response.status_code in RETRY_STATUS and attempt < self.retries:
-                time.sleep(2 ** (attempt + 1))
+                time.sleep(self._wait_seconds(response, attempt))
                 continue
             break
         try:

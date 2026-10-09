@@ -504,8 +504,12 @@ def _answer_about_review(corpus, question, findings) -> dict | None:
             "suggestions": [{"finding_id": f["finding_id"], "recommendation": text} for f, text in proposals],
         }
     listed = "; ".join(f"{_finding_label(f)}: {f.get('coverage')}, {f.get('status')}" for f in targets[:12])
+    # Show the NIST controls these findings were checked against, so the answer has sources.
+    controls = list(dict.fromkeys(f["framework_control"] for f in targets[:12]
+                                  if f.get("framework_control") in data.CONTROLS))
+    citations = [{**make_framework_chunk(cid, data.CONTROLS[cid]), "score": 1.0} for cid in controls]
     return {"answer": f"Simulated answer (rules, not Claude). {len(targets)} finding(s) match: {listed}.",
-            "citations": [], "suggestions": []}
+            "citations": citations, "suggestions": []}
 
 
 def simulated_answer(corpus: list[dict], question: str, findings: list[dict] | None = None) -> dict:

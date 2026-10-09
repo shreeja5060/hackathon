@@ -14,6 +14,7 @@ venv/
 # Vector store / local DB
 chroma_db/
 *.sqlite3
+*.sqlite3-*
 *.db
 
 # OS / editor
@@ -34,3 +35,7 @@ build/
 # Generated Phase 1 data
 /data/frameworks/
 venv312/
+
+# Review records kept by the dashboard (ledger, saved documents, Litestream state)
+/data/documents*/
+/data/.ledger*

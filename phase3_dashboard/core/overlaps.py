@@ -28,7 +28,7 @@ GAPS = ("Partial", "Missing")
 COVERAGE_RANK = {"Full": 3, "Partial": 2, "Missing": 1, "Not observable": 0}
 
 _NUMBER_WORDS = {
-    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
     "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30,
     "forty-five": 45, "sixty": 60, "ninety": 90,
 }
@@ -45,7 +45,11 @@ _FREQUENCY = {"hourly": 60, "daily": 1440, "nightly": 1440, "weekly": 10080, "mo
 _NUMBER = r"(\d+(?:\.\d+)?|" + "|".join(sorted(map(re.escape, _NUMBER_WORDS), key=len, reverse=True)) + r")"
 _UNIT = r"(business days?|working days?|seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|" \
         r"characters?|chars?|digits?|attempts?|tries|try)"
-_QUANTITY = re.compile(rf"\b{_NUMBER}[\s-]+(?:[\w-]+\s+){{0,2}}{_UNIT}\b", re.I)
+# Up to two describing words may sit between the number and the unit ("10 failed sign-in attempts"),
+# but not another number ("a 15 minute period" is 15 minutes, not 1).
+_FILLER = r"(?:(?!\d)(?!(?:" + "|".join(_NUMBER_WORDS) + r")\b)[A-Za-z][\w-]*\s+){0,2}"
+_QUANTITY = re.compile(rf"\b{_NUMBER}[\s-]+{_FILLER}{_UNIT}\b", re.I)
+_ONE_UNIT = re.compile(r"\b(?:a|an|one)\s+(minute|hour|day|week|month|year)\b", re.I)  # "within an hour"
 _FREQ = re.compile(r"\b(" + "|".join(_FREQUENCY) + r")\b", re.I)
 _EVERY = re.compile(rf"\bevery\s+(?:{_NUMBER}\s+)?(minute|hour|day|week|month|year)s?\b", re.I)
 
@@ -75,6 +79,8 @@ def quantities(text: str | None) -> dict[str, dict[float, str]]:
         number, unit = match.group(1), match.group(2)
         dimension, factor = _unit(unit)
         found[dimension].setdefault(round(_number(number) * factor, 4), f"{number} {unit}".lower())
+    for match in _ONE_UNIT.finditer(text):
+        found["time"].setdefault(float(_UNITS[match.group(1).lower()][1]), " ".join(match.group(0).lower().split()))
     for match in _FREQ.finditer(text):
         found["time"].setdefault(float(_FREQUENCY[match.group(1).lower()]), match.group(1).lower())
     for match in _EVERY.finditer(text):

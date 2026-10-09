@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import AnalysisRun, Citation, Finding, SectionResult
-from .review import AuditEvent, ReviewSession
+from .review import AuditEvent, ReviewSession, same_person
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LEDGER = REPO_ROOT / "data" / "ledger.sqlite3"
@@ -185,7 +185,7 @@ def replay(events: list[dict]) -> tuple[dict[str, dict], dict[str, Any]]:
                          decided_at=event["ts"], note=detail.get("note") or "")
         elif action in ("approved_final", "rejection_confirmed"):
             expected = "approved" if action == "approved_final" else "rejected"
-            if state["status"] == expected:
+            if state["status"] == expected and not same_person(event["actor"], state["decided_by"]):
                 state.update(confirmed_by=event["actor"], confirmed_at=event["ts"],
                              confirmation_note=detail.get("note") or "")
         elif action == "reopened":
@@ -223,10 +223,10 @@ def _audit_event(event: dict) -> AuditEvent | None:
 class Memory:
     def __init__(self, ledger_path: Path | str, documents_dir: Path | str):
         try:
-            from shared.ledger import ApprovalError, Ledger
+            from shared.ledger import ApprovalError, Ledger, StaleWrite
         except ImportError as exc:  # pragma: no cover - the ledger ships with the repo
             raise MemoryUnavailable("shared/ledger.py isn't on this branch, so reviews can't be kept.") from exc
-        self.ApprovalError = ApprovalError
+        self.ApprovalError, self.StaleWrite = ApprovalError, StaleWrite
         try:
             self.ledger = Ledger(ledger_path)
         except Exception as exc:  # noqa: BLE001 - a read-only or missing disk shouldn't crash the app
@@ -237,8 +237,31 @@ class Memory:
 
     # -------------------------------------------------------------- documents
 
+    def lookup(self, document, content: bytes | None) -> dict:
+        """What the library already knows about this exact document, without recording anything.
+
+        Shown on the Analyze page before anything is run: same file as version N (with its reviews),
+        or the next version of a known policy, or new.
+        """
+        raw = content if content is not None else document_content(document)
+        sha = hashlib.sha256(raw).hexdigest()
+        versions = self.ledger.documents(document.source)
+        runs = self.ledger.runs(document.source)
+        match = next((d for d in versions if d["sha256"] == sha), None)
+        if match is not None:
+            own = [r for r in runs if r["version"] == match["version"]]
+            return {"name": document.source, "version": match["version"], "sha256": sha, "already_seen": True,
+                    "is_new_version": False, "previous_version": None, "runs": own, "previous_summary": None,
+                    "latest_summary": self.run_summary(own[-1]["id"]) if own else None}
+        previous = versions[-1]["version"] if versions else None
+        earlier = [r for r in runs if r["version"] == previous] if previous else []
+        return {"name": document.source, "version": (previous or 0) + 1, "sha256": sha, "already_seen": False,
+                "is_new_version": previous is not None, "previous_version": previous, "runs": [],
+                "previous_summary": self.run_summary(earlier[-1]["id"]) if earlier else None,
+                "latest_summary": None}
+
     def register(self, document, content: bytes | None, actor: str | None, extension: str = ".pdf") -> dict:
-        """Note a policy when it's loaded. Returns the ledger's version info plus what's known about it."""
+        """Record a policy version (when it's analyzed, or a draft is approved) and keep the file itself."""
         raw = content if content is not None else document_content(document)
         info = self.ledger.register_document(document.source, raw)
         if not info["already_seen"]:
@@ -289,63 +312,79 @@ class Memory:
         session.ledger_run_id = run_id
         session.document_record = {key: document_info.get(key) for key in ("id", "name", "version", "sha256")}
         session.synced_events = len(session.audit_log)
-        session.ledger_seq = self.ledger.last_seq(run_id)
+        session.ledger_seq = self.ledger.last_decision_seq(run_id)
         return run_id
 
     # -------------------------------------------------------------- decisions
 
     def check_fresh(self, session: ReviewSession) -> None:
+        """Refuse (StaleReview) if another session recorded a decision on this review since this one read it.
+
+        Only decisions count: someone asking the assistant for wording doesn't make your page out of date.
+        """
         if session.ledger_run_id is None:
             return
-        latest = self.ledger.last_seq(session.ledger_run_id)
-        if latest > session.ledger_seq:
-            last = self.ledger.events(run_id=session.ledger_run_id)[-1]
-            raise StaleReview(f"{last['actor']} changed this review at {last['ts'][11:16]} UTC in another session. "
-                              "Reopen it from the library to see the latest decisions.")
+        latest = self.ledger.last_decision_seq(session.ledger_run_id)
+        if latest != session.ledger_seq:
+            raise StaleReview(self._stale_message(session.ledger_run_id))
+
+    def _stale_message(self, run_id: int) -> str:
+        decisions = [e for e in self.ledger.events(run_id=run_id) if e["action"] in self.ledger.DECISIONS]
+        if not decisions:
+            return "This review changed in another session. Reopen it from the library to see the latest decisions."
+        last = decisions[-1]
+        return (f"{last['actor']} changed this review at {last['ts'][11:16]} UTC in another session. "
+                "Reopen it from the library to see the latest decisions.")
 
     def unsynced(self, session: ReviewSession) -> int:
         return max(0, len(session.audit_log) - session.synced_events) if session.ledger_run_id else 0
 
     def sync(self, session: ReviewSession) -> int:
-        """Write the session's new audit entries to the ledger, in order. Returns how many were written."""
+        """Write the session's new audit entries to the ledger. Returns how many were written.
+
+        All of them go in one transaction, together with the check that nobody else recorded a
+        decision since this session read the review, and the ledger's own rules (two different
+        people, nothing after sign-off). Either everything is written or nothing is.
+        """
         if session.ledger_run_id is None:
             return 0
         pending = session.audit_log[session.synced_events:]
         if not pending:
             return 0
-        self.check_fresh(session)
-        written = 0
-        for event in pending:
-            try:
-                seq = self._write(session, event)
-            except self.ApprovalError as exc:
-                raise StaleReview(f"The ledger refused this step: {exc}. Reopen the review from the library.") from exc
-            session.synced_events += 1
-            session.ledger_seq = max(session.ledger_seq, seq or 0)
-            written += 1
-        return written
+        entries = [self._entry(event) for event in pending]
+        try:
+            seqs = self.ledger.append(entries, run_id=session.ledger_run_id, expect_last_decision=session.ledger_seq)
+        except self.StaleWrite as exc:
+            raise StaleReview(self._stale_message(session.ledger_run_id)) from exc
+        except self.ApprovalError as exc:
+            raise StaleReview(f"The ledger refused this step: {exc}. Reopen the review from the library.") from exc
+        session.synced_events += len(pending)
+        decision_seqs = [seq for entry, seq in zip(entries, seqs) if entry["action"] in self.ledger.DECISIONS]
+        if decision_seqs:
+            session.ledger_seq = max(decision_seqs)
+        return len(pending)
 
-    def _write(self, session: ReviewSession, event: AuditEvent) -> int:
-        run, fid, actor, detail = session.ledger_run_id, event.finding_id, event.reviewer, dict(event.detail)
-        record = self.ledger.record_event
+    @staticmethod
+    def _entry(event: AuditEvent) -> dict:
+        """A dashboard audit entry as a ledger entry (same time, same details)."""
+        detail = dict(event.detail)
+        entry = {"actor": event.reviewer, "finding_id": event.finding_id, "ts": event.timestamp}
         if event.action in APPROVALS:
-            return record(actor, "approved_first", run, fid, "reviewer", {**detail, "kind": event.action},
-                          ts=event.timestamp)
+            return {**entry, "action": "approved_first", "role": "reviewer", "detail": {**detail, "kind": event.action}}
         if event.action == "rejected":
             detail["note"] = detail.pop("reason", "")
-            return record(actor, "rejected", run, fid, "reviewer", detail, ts=event.timestamp)
+            return {**entry, "action": "rejected", "role": "reviewer", "detail": detail}
         if event.action == "confirmed":
-            if detail.get("decision") == "approved":
-                return self.ledger.approve_final(actor, run, fid, detail.get("note") or None)
-            return record(actor, "rejection_confirmed", run, fid, "approver", detail, ts=event.timestamp)
+            action = "approved_final" if detail.get("decision") == "approved" else "rejection_confirmed"
+            return {**entry, "action": action, "role": "approver", "detail": detail}
         if event.action == "sent_back":
-            return record(actor, "reopened", run, fid, "approver", {**detail, "sent_back": True}, ts=event.timestamp)
+            return {**entry, "action": "reopened", "role": "approver", "detail": {**detail, "sent_back": True}}
         if event.action == "reopened":
-            return record(actor, "reopened", run, fid, "reviewer", detail, ts=event.timestamp)
+            return {**entry, "action": "reopened", "role": "reviewer", "detail": detail}
         if event.action == "finalized":
-            return record(actor, "review_signed", run, None, "approver", detail, ts=event.timestamp)
+            return {**entry, "action": "review_signed", "role": "approver", "detail": detail, "finding_id": None}
         role = "reviewer" if event.action == "assistant_suggested" else None
-        return record(actor, event.action, run, fid, role, detail, ts=event.timestamp)
+        return {**entry, "action": event.action, "role": role, "detail": detail}
 
     # -------------------------------------------------------------- reopening a review
 
@@ -398,7 +437,8 @@ class Memory:
         if docs:
             session.document_record.update(id=docs[0]["id"], sha256=docs[0]["sha256"])
         session.synced_events = len(session.audit_log)
-        session.ledger_seq = self.ledger.last_seq(run_id)
+        # From the same read as the state above, so a write that lands meanwhile makes this copy stale.
+        session.ledger_seq = max((e["seq"] for e in events if e["action"] in self.ledger.DECISIONS), default=0)
         session.restored = True
         return session
 
@@ -439,7 +479,7 @@ class Memory:
         }
 
     def library(self) -> list[dict[str, Any]]:
-        """One row per policy (its latest version), newest activity first."""
+        """One row per policy, newest activity first. "latest" is the newest analyzed review (of any version)."""
         documents = self.ledger.documents()
         runs = self.ledger.runs()
         rows = []
@@ -447,11 +487,13 @@ class Memory:
             versions = [d for d in documents if d["name"] == name]
             latest = versions[-1]
             doc_runs = [r for r in runs if r["document"] == name]
-            latest_runs = [r for r in doc_runs if r["version"] == latest["version"]]
-            summary = self.run_summary(latest_runs[-1]["id"]) if latest_runs else None
+            summary = self.run_summary(doc_runs[-1]["id"]) if doc_runs else None
+            analyzed = doc_runs[-1]["version"] if doc_runs else None
+            if summary and analyzed != latest["version"]:
+                summary = {**summary, "label": f"{summary['label']} (v{analyzed}); v{latest['version']} not analyzed"}
             rows.append({
-                "name": name, "version": latest["version"], "versions": len(versions), "sha256": latest["sha256"],
-                "first_seen": versions[0]["created_at"], "added": latest["created_at"],
+                "name": name, "version": latest["version"], "analyzed_version": analyzed, "versions": len(versions),
+                "sha256": latest["sha256"], "first_seen": versions[0]["created_at"], "added": latest["created_at"],
                 "runs": len(doc_runs), "latest": summary,
                 "last_activity": (summary or {}).get("last_activity") or latest["created_at"],
             })
@@ -484,7 +526,7 @@ class Memory:
             return {}
 
     def statements(self) -> list[dict[str, Any]]:
-        """What every stored policy says, per control: the latest analysis of each document's latest version.
+        """What every stored policy says, per control: the latest analysis of each policy.
 
         Rejected findings are left out (a reviewer said they're wrong). Used to find overlaps and conflicts.
         """
@@ -500,7 +542,7 @@ class Memory:
                 if state["status"] == "rejected" or not record.get("framework_control"):
                     continue
                 out.append({
-                    "policy": row["name"], "version": row["version"], "run_id": run_id,
+                    "policy": row["name"], "version": row["analyzed_version"], "run_id": run_id,
                     "finding_id": record["finding_id"], "requirement": record.get("requirement"),
                     "requirement_text": record.get("requirement_text"), "control": record["framework_control"],
                     "coverage": record.get("coverage"), "locator": (record.get("citation") or {}).get("locator"),

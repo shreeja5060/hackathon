@@ -473,3 +473,29 @@ def test_the_assistant_answers_overlap_questions_from_the_library(monkeypatch):
     reply = at.session_state["chat"][-1]
     assert "Computer_Security_Policy" in reply["content"] and reply["citations"]
     assert "5 minutes here, 15 minutes there" in reply["content"]
+
+
+def test_a_sign_off_the_ledger_refuses_is_not_announced(monkeypatch):
+    """Someone changes the review while it is being signed off: no report, and the page says why."""
+    from phase3_dashboard.core import analysis, memory, review as review_rules
+
+    at = fresh_app(monkeypatch)
+    session = run_sample_analysis(at, reviewer="Mahsa")
+    decide_everything(at)
+    real = analysis.finalize_review
+
+    def racing(backend, live_session, reviewer):
+        mem = memory.Memory(*memory.default_paths(simulated=True))
+        other = mem.restore(live_session.ledger_run_id)
+        review_rules.reopen(other, other.findings[0].finding_id, "Anu")
+        mem.sync(other)
+        return real(backend, live_session, reviewer)
+
+    monkeypatch.setattr(analysis, "finalize_review", racing)
+    at.button(key="finalize").click().run()
+    assert not at.exception
+    assert not session.finalized and at.session_state["nav"] == "Review"
+    assert any("changed this review" in e.value for e in at.error)
+    assert not [d for d in at.download_button]
+    ledger_events = memory.Memory(*memory.default_paths(simulated=True)).ledger.events()
+    assert not any(e["action"] == "review_signed" for e in ledger_events)

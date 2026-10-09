@@ -184,3 +184,64 @@ def test_statements_leave_out_rejected_findings(sim_backend, mem):
     statements = mem.statements()
     assert statements and rejected.finding_id not in {s["finding_id"] for s in statements}
     assert all(s["control"] for s in statements)
+
+
+def test_a_self_confirmed_rejection_is_refused_by_the_ledger(sim_backend, mem):
+    session = analyze(sim_backend, mem)
+    target = session.findings[0]
+    review.reject(session, target.finding_id, A, "Out of scope here")
+    mem.sync(session)
+    session.audit_log.append(review.AuditEvent(review.utc_now(), "mahsa", "confirmed", target.finding_id,
+                                               {"decision": "rejected"}))
+    with pytest.raises(memory.StaleReview, match="different person"):
+        mem.sync(session)
+    assert mem.restore(session.ledger_run_id).get(target.finding_id).confirmed_by is None
+
+
+def test_a_sign_off_over_an_unseen_change_is_refused(sim_backend, mem):
+    session = analyze(sim_backend, mem, two_person=False)
+    for finding in session.findings:
+        review.reject(session, finding.finding_id, A, "Checked by hand") if finding.problems else \
+            review.approve(session, finding.finding_id, A)
+    mem.sync(session)
+    other = mem.restore(session.ledger_run_id)
+    review.reopen(other, other.findings[-1].finding_id, B)  # lands after the first page's last read
+    mem.sync(other)
+    assert analysis.finalize_review(sim_backend, session, A) == []  # locally it looks finished...
+    with pytest.raises(memory.StaleReview):
+        mem.sync(session)                                       # ...but the ledger refuses the sign-off
+    review.undo_unsaved_sign_off(session)
+    assert not session.finalized and session.audit_log[-1].action != "finalized"
+    assert not mem.restore(session.ledger_run_id).finalized
+
+
+def test_confirmations_keep_their_time_and_details(sim_backend, mem):
+    session = analyze(sim_backend, mem)
+    target = session.findings[0]
+    review.approve(session, target.finding_id, A)
+    mem.sync(session)
+    other = mem.restore(session.ledger_run_id)
+    review.confirm(other, target.finding_id, B, "Agreed")
+    confirmed_at = other.get(target.finding_id).confirmed_at
+    mem.sync(other)
+    again = mem.restore(session.ledger_run_id)
+    assert again.get(target.finding_id).confirmed_at == confirmed_at
+    event = next(e for e in again.audit_log if e.action == "confirmed")
+    assert event.detail["decided_by"] == A and event.detail["note"] == "Agreed"
+
+
+def test_a_new_version_loaded_but_not_analyzed_keeps_the_last_review_visible(sim_backend, mem):
+    session = analyze(sim_backend, mem)
+    document = sim_backend.load_policy(sim_backend.list_policies()[0])
+    looked_up = mem.lookup(document, None)
+    assert looked_up["already_seen"] and looked_up["runs"]          # lookup records nothing
+    from phase3_dashboard.backends.base import PolicyDocument
+    changed = PolicyDocument(document.source, [dict(c, text=c["text"] + " Updated.") for c in document.chunks],
+                             "sample")
+    preview = mem.lookup(changed, None)
+    assert (preview["version"], preview["is_new_version"]) == (2, True)
+    assert [d["version"] for d in mem.ledger.documents()] == [1]
+    mem.register(changed, None, A)                                 # e.g. an approved draft not checked yet
+    row = mem.library()[0]
+    assert row["latest"]["run_id"] == session.ledger_run_id and "v2 not analyzed" in row["latest"]["label"]
+    assert mem.statements()                                        # its findings still count for overlaps

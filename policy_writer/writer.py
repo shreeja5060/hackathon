@@ -168,7 +168,7 @@ def draft_policy(profile: Profile, topic_ids, drafter: Drafter | None = None, me
         section = DraftSection(f"4.{number}", topic.id, topic.title, baseline)
         if drafter is not None:
             try:
-                section.clauses = validate_clauses(drafter(profile, topic, baseline), topic)
+                section.clauses = validate_clauses(drafter(profile, topic, baseline), baseline)
                 section.method = "ai"
             except Exception as exc:  # noqa: BLE001 - one bad section keeps its baseline text, the rest go on
                 section.method = "baseline (the AI draft failed)"
@@ -185,13 +185,21 @@ def _short(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
-def validate_clauses(raw, topic: Topic) -> list[DraftClause]:
-    """Keep the AI's clauses only if each one is text tied to one of this section's controls."""
-    allowed = set(topic.controls)
+def section_controls(baseline: list[DraftClause]) -> list[str]:
+    """The controls a section implements for THIS organization (clauses that don't apply are already out)."""
+    return list(dict.fromkeys(clause.control for clause in baseline))
+
+
+def validate_clauses(raw, baseline: list[DraftClause]) -> list[DraftClause]:
+    """Keep the AI's clauses only if each is text tied to one of the section's controls, and all are covered."""
+    required = section_controls(baseline)
+    allowed = set(required)
     if not isinstance(raw, list) or not raw:
         raise DraftError("the AI returned no clauses")
+    if len(raw) > MAX_CLAUSES_PER_SECTION:
+        raise DraftError(f"the AI returned {len(raw)} clauses; a section has at most {MAX_CLAUSES_PER_SECTION}")
     clauses = []
-    for item in raw[:MAX_CLAUSES_PER_SECTION]:
+    for item in raw:
         control = item.control if isinstance(item, DraftClause) else (item or {}).get("control")
         text = item.text if isinstance(item, DraftClause) else (item or {}).get("text")
         if control not in allowed:
@@ -199,7 +207,7 @@ def validate_clauses(raw, topic: Topic) -> list[DraftClause]:
         if not isinstance(text, str) or len(text.strip()) < 15:
             raise DraftError("a clause was empty or too short")
         clauses.append(DraftClause(control, _sentence(text)[:MAX_CLAUSE_CHARS]))
-    missing = [c for c in topic.controls if c not in {clause.control for clause in clauses}]
+    missing = [c for c in required if c not in {clause.control for clause in clauses}]
     if missing:
         raise DraftError(f"the AI left out {', '.join(missing)}")
     return clauses
@@ -413,7 +421,7 @@ def build_prompt(profile: Profile, topic: Topic, baseline: list[DraftClause],
         "it_support": profile.it_support, "uses": sorted(profile.uses),
     }, ensure_ascii=False)
     controls = []
-    for control in topic.controls:
+    for control in section_controls(baseline):  # only the controls that apply to this organization
         title, baseline_name = CONTROLS[control]
         text = (control_text(control) if control_text else None) or ""
         text = " ".join(text.split())[:1200]

@@ -115,10 +115,11 @@ def fake_client(reply_for):
 
 
 def good_reply(prompt):
-    topic = next(t for t in TOPICS if f'"{t.title}" section' in prompt)
+    """A model that rewrites every clause it was given (and only those controls)."""
+    controls = [line.split("] ", 1)[0][3:] for line in prompt.splitlines() if line.startswith("- [")]
     return "```json\n" + json.dumps({"clauses": [
         {"control": control, "text": f"Maple Street Bakery staff must follow the {control} rule every day."}
-        for control in topic.controls]}) + "\n```"
+        for control in dict.fromkeys(controls)]}) + "\n```"
 
 
 def test_the_ai_adapts_each_section_from_nist_text():
@@ -149,3 +150,21 @@ def test_a_bad_ai_section_keeps_the_baseline_and_says_why(reply, reason):
     assert [c.text for c in incidents.clauses] == [c.text for c in writer.baseline_clauses(
         catalog.TOPIC_BY_ID["incidents"], draft.profile)]
     assert draft.notes  # the page shows which sections fell back
+
+
+def test_the_ai_is_only_asked_for_controls_that_apply():
+    """No laptops: the devices section has no disk-encryption rule, and the AI isn't asked for one."""
+    no_laptops = Profile(org="Corner Shop", uses=frozenset())
+    client = fake_client(good_reply)
+    draft = writer.draft_policy(no_laptops, ["devices", "email_internet", "data_backups"],
+                                drafter=writer.claude_drafter(client, "model-x"))
+    assert all(s.method == "ai" for s in draft.sections), draft.notes
+    prompts = " ".join(call["messages"][0]["content"] for call in client.calls)
+    assert "SC-28" not in prompts and "SC-7 Boundary" not in prompts and "SC-13" not in prompts
+
+
+def test_too_many_ai_clauses_are_refused_not_cut():
+    many = json.dumps({"clauses": [{"control": "IR-6", "text": f"Report incident type {n} to the Security Lead."}
+                                   for n in range(writer.MAX_CLAUSES_PER_SECTION + 1)]})
+    draft = writer.draft_policy(BAKERY, ["incidents"], drafter=writer.claude_drafter(fake_client(lambda p: many), "m"))
+    assert "at most" in draft.section("incidents").note

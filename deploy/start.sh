@@ -8,12 +8,15 @@
 set -eu
 
 cd /app/phase3_dashboard
-export LEDGER_PATH="${LEDGER_PATH:-/app/data/ledger.sqlite3}"
-# Same rule as phase3_dashboard/core/memory.py: the simulator keeps its own file.
+# The same paths the dashboard uses (phase3_dashboard/core/memory.py), made absolute, so Litestream
+# replicates exactly the files the app writes. The simulator keeps its own file.
+LEDGER_PATH="$(python -c 'import sys; sys.path.insert(0, "/app")
+from phase3_dashboard.core.memory import default_paths
+print(default_paths(False)[0])')"
 LEDGER_SIM_PATH="$(python -c 'import sys; sys.path.insert(0, "/app")
 from phase3_dashboard.core.memory import default_paths
 print(default_paths(True)[0])')"
-export LEDGER_SIM_PATH
+export LEDGER_PATH LEDGER_SIM_PATH
 
 APP="streamlit run app.py --server.port=${PORT:-8080} --server.address=0.0.0.0 \
 --server.headless=true --browser.gatherUsageStats=false"

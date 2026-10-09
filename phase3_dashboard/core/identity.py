@@ -58,7 +58,12 @@ def verify_jwt(token: str, audience: str) -> dict | None:
         from google.auth.transport import requests as google_requests
         from google.oauth2 import id_token
 
-        return id_token.verify_token(token, google_requests.Request(), audience=audience, certs_url=IAP_CERTS)
+        request = google_requests.Request()
+        try:  # Google suggests allowing ~30 s of clock skew; older google-auth versions don't take it
+            return id_token.verify_token(token, request, audience=audience, certs_url=IAP_CERTS,
+                                         clock_skew_in_seconds=30)
+        except TypeError:
+            return id_token.verify_token(token, request, audience=audience, certs_url=IAP_CERTS)
     except Exception:  # noqa: BLE001 - an unverifiable token is no identity at all
         return None
 

@@ -146,7 +146,8 @@ def approve(session, finding_id, reviewer, *, edited_recommendation=None, note="
             edited = proposed
 
     # Was the approved text the assistant's wording, accepted as is?
-    from_assistant = edited is not None and edited == (finding.assistant_suggestion or "").strip()
+    suggestion = (finding.assistant_suggestion or "").strip()
+    from_assistant = edited is not None and bool(suggestion) and edited == suggestion
 
     finding.status = "approved"
     finding.reviewer = reviewer
@@ -410,6 +411,15 @@ def assistant_context(session: ReviewSession | None) -> list[dict]:
             "cited_text": passage["text"] if passage else None,
         })
     return context
+
+
+def undo_unsaved_sign_off(session: ReviewSession) -> None:
+    """The permanent record refused the sign-off (the review changed in another session), so it didn't happen."""
+    if session.audit_log and session.audit_log[-1].action == "finalized":
+        session.audit_log.pop()
+    session.finalized = False
+    session.finalized_by = None
+    session.finalized_at = None
 
 
 def mark_finalized(session: ReviewSession, reviewer) -> None:

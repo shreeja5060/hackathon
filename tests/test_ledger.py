@@ -208,3 +208,54 @@ def test_the_memory_note_summarises_versions_counts_and_open_items(ledger, run, 
 
 def test_the_memory_note_for_an_unknown_document_says_so(ledger):
     assert "Nothing recorded" in ledger.memory_note("nope.pdf")
+
+
+# ---- one transaction per batch: the rules can't be raced ----
+
+def test_a_batch_is_all_or_nothing(ledger, run):
+    before = len(ledger.events())
+    with pytest.raises(ApprovalError, match="different person"):
+        ledger.append([{"actor": "Rashmi", "action": "approved_first", "finding_id": "F001"},
+                       {"actor": "rashmi", "action": "approved_final", "finding_id": "F001"}], run_id=run)
+    assert len(ledger.events()) == before and ledger.finding_state(run, "F001")["state"] == "pending"
+
+
+def test_a_page_that_is_out_of_date_is_refused(ledger, run):
+    from ledger import StaleWrite
+
+    seen = ledger.last_decision_seq(run)
+    ledger.record_event("Anu", "assistant_suggested", run, "F002", detail={"suggestion": "x"})  # not a decision
+    ledger.append([{"actor": "Rashmi", "action": "approved_first", "finding_id": "F001"}],
+                  run_id=run, expect_last_decision=seen)                               # still fresh
+    with pytest.raises(StaleWrite):
+        ledger.append([{"actor": "Mahsa", "action": "approved_first", "finding_id": "F002"}],
+                      run_id=run, expect_last_decision=seen)                           # Rashmi wrote since
+    assert ledger.finding_state(run, "F002")["state"] == "pending"
+
+
+def test_rejections_are_confirmed_by_someone_else(ledger, run):
+    ledger.reject("Rashmi", run, "F001", "out of scope")
+    with pytest.raises(ApprovalError, match="different person"):
+        ledger.append([{"actor": " RASHMI", "action": "rejection_confirmed", "finding_id": "F001"}], run_id=run)
+    ledger.append([{"actor": "Anu", "action": "rejection_confirmed", "finding_id": "F001"}], run_id=run)
+    assert ledger.finding_state(run, "F001")["rejection_confirmed_by"] == "Anu"
+    with pytest.raises(ApprovalError, match="no unconfirmed rejection"):
+        ledger.append([{"actor": "Mahsa", "action": "rejection_confirmed", "finding_id": "F002"}], run_id=run)
+
+
+def test_sign_off_needs_every_decision_and_then_locks_them(ledger):
+    doc = ledger.register_document(NAME, "two-person text")
+    run = ledger.record_run(doc["id"], [_finding("F001", "s-a", "Section 1"), _finding("F002", "s-b", "Section 2")],
+                            detail={"two_person": True})
+    sign = [{"actor": "Anu", "action": "review_signed", "detail": {}}]
+    with pytest.raises(ApprovalError, match="2 finding"):
+        ledger.append(sign, run_id=run)
+    ledger.approve_first("Rashmi", run, "F001")
+    ledger.reject("Rashmi", run, "F002", "not applicable")
+    with pytest.raises(ApprovalError, match="second reviewer"):
+        ledger.append(sign, run_id=run)                                # decided, not confirmed
+    ledger.approve_final("Anu", run, "F001")
+    ledger.append([{"actor": "Anu", "action": "rejection_confirmed", "finding_id": "F002"}], run_id=run)
+    ledger.append(sign, run_id=run)
+    with pytest.raises(ApprovalError, match="signed off"):
+        ledger.append([{"actor": "Rashmi", "action": "reopened", "finding_id": "F001"}], run_id=run)

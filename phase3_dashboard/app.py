@@ -82,7 +82,8 @@ def init_state() -> None:
     ss.setdefault("backends", {})
     ss.setdefault("doc", None)
     ss.setdefault("doc_key", None)
-    ss.setdefault("doc_info", None)  # what the ledger knows about the loaded document
+    ss.setdefault("doc_bytes", None)  # the loaded file, kept until it is analyzed and stored
+    ss.setdefault("doc_ext", ".pdf")
     ss.setdefault("review_session", None)
     ss.setdefault("chat", [])
     ss.setdefault("focus_id", None)
@@ -112,7 +113,7 @@ def reset_work() -> None:
     ss = st.session_state
     ss.doc = None
     ss.doc_key = None
-    ss.doc_info = None
+    ss.doc_bytes = None
     ss.review_session = None
     ss.chat = []
     ss.focus_id = None
@@ -199,10 +200,18 @@ def _session_memory(session) -> memory.Memory | None:
 
 
 def _guard(session) -> bool:
-    """Before changing a stored review, make sure nobody changed it in another session meanwhile."""
+    """Before changing a stored review: everything earlier is saved, and nobody changed it meanwhile.
+
+    After a refusal the page stays read-only until it is reopened, so no later step can build on
+    a decision the ledger didn't accept.
+    """
     mem = _session_memory(session)
     if mem is None:
         return True
+    if st.session_state.get("_stale"):
+        return False
+    if not _persist(session):
+        return False
     try:
         mem.check_fresh(session)
     except memory.StaleReview as exc:
@@ -211,31 +220,40 @@ def _guard(session) -> bool:
     return True
 
 
-def _persist(session) -> None:
-    """Write the review's new actions to the ledger. Never loses a decision: on failure it retries next time."""
+def _persist(session) -> bool:
+    """Write the review's new actions to the ledger. True when everything is saved (or memory is off)."""
     mem = _session_memory(session)
     if mem is None:
-        return
+        return True
     try:
         mem.sync(session)
     except memory.StaleReview as exc:
         st.session_state["_stale"] = str(exc)
+        return False
     except Exception as exc:  # noqa: BLE001 - the decision stays in the session and is retried
         log.exception("Saving to the ledger failed")
         st.session_state["_memory_warning"] = (f"Couldn't save to the library just now ({type(exc).__name__}). "
                                                "Your decision is kept here and will be saved with the next one.")
+        return False
+    return True
 
 
-def _remember_document(backend, document, content: bytes | None, extension: str = ".pdf") -> None:
-    st.session_state.doc_info = None
+def _keep_content(content: bytes | None, extension: str = ".pdf") -> None:
+    """The loaded document's bytes, kept until it is analyzed (then the library stores the file)."""
+    st.session_state.doc_bytes = content
+    st.session_state.doc_ext = extension
+
+
+def _lookup_document(backend, document):
+    """What the library knows about the loaded document (read only; recorded when it is analyzed)."""
     mem = get_memory(backend.simulated)
     if mem is None:
-        return
+        return None
     try:
-        st.session_state.doc_info = mem.register(document, content, _reviewer() or None, extension)
-    except Exception as exc:  # noqa: BLE001 - the policy can still be analyzed, just not kept
-        log.exception("Registering %s failed", document.source)
-        st.session_state["_memory_warning"] = f"This policy couldn't be added to the library ({type(exc).__name__})."
+        return mem.lookup(document, st.session_state.get("doc_bytes"))
+    except Exception:  # noqa: BLE001 - extra context only
+        log.exception("Looking up %s failed", document.source)
+        return None
 
 
 def _open_review(simulated: bool, run_id: int, message: str | None = None) -> None:
@@ -269,9 +287,14 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("### :material/shield: Compliance Copilot", anchors=False)
         st.caption("AI drafts the findings. People sign them off.")
-        signed_in = identity.from_headers(getattr(st.context, "headers", None))
-        if signed_in:
-            st.session_state.reviewer_name = signed_in
+        signed_in = None
+        if identity.required():
+            # IAP authenticated this browser session when it connected, so check its token once
+            # and keep the identity for the session (the token itself expires after minutes).
+            signed_in = st.session_state.get("_iap_identity") or identity.from_headers(
+                getattr(st.context, "headers", None))
+            st.session_state["_iap_identity"] = signed_in
+            st.session_state.reviewer_name = signed_in or ""
         reviewer = st.text_input(
             "Reviewer",
             key="reviewer_name",
@@ -357,10 +380,10 @@ def _load_upload(backend, upload):
         except (security.UploadRejected, BackendUnavailable) as exc:
             st.session_state.doc = None
             st.session_state.doc_key = None
-            st.session_state.doc_info = None
+            _keep_content(None)
             st.error(escape_md(str(exc)), icon=":material/error:")
         else:
-            _remember_document(backend, st.session_state.doc, data)
+            _keep_content(data)
     return st.session_state.doc
 
 
@@ -373,7 +396,7 @@ def _load_existing(backend, source: str):
         except BackendUnavailable as exc:
             st.error(escape_md(str(exc)), icon=":material/error:")
             return None
-        _remember_document(backend, st.session_state.doc, None)
+        _keep_content(None)
     return st.session_state.doc
 
 
@@ -389,7 +412,7 @@ def _load_draft(backend, draft):
     if st.session_state.doc_key != key:
         st.session_state.doc = _draft_document(draft)
         st.session_state.doc_key = key
-        _remember_document(backend, st.session_state.doc, markdown, extension=".md")
+        _keep_content(markdown, ".md")
     return st.session_state.doc
 
 
@@ -418,11 +441,12 @@ def _render_version_note(backend, info) -> None:
         runs = info.get("runs") or []
         text = f":material/history: Already in the library as version {info['version']}"
         if runs:
-            mem = get_memory(backend.simulated)
-            latest = mem.run_summary(runs[-1]["id"]) if mem else None
+            latest = info.get("latest_summary")
             text += f", analyzed {plural(len(runs), 'time')}"
             if latest:
                 text += f". Latest review: {escape_md(_lower_first(latest['label']))}"
+        else:
+            text += " (approved as a draft, not analyzed yet)"
         with st.container(horizontal=True, vertical_alignment="center", gap="small"):
             st.caption(text + ".", width="content")
             if runs and st.button("Open the latest review", key="open_latest", type="tertiary",
@@ -438,8 +462,8 @@ def _render_version_note(backend, info) -> None:
                      "After the analysis, the review shows what changed and what was decided before.")
         st.caption(text)
     else:
-        st.caption(":material/new_releases: New to the library. It will be kept as version 1, with every finding "
-                   "and decision.")
+        st.caption(":material/new_releases: New to the library. When you run the analysis it is kept as version 1, "
+                   "with every finding and decision.")
 
 
 def _section_picker(doc) -> list[str]:
@@ -521,12 +545,13 @@ def _run_analysis(backend, doc, chunk_ids):
     return session
 
 
-def _record_analysis(backend, session) -> None:
+def _record_analysis(backend, session, document) -> None:
     mem = get_memory(backend.simulated)
-    info = st.session_state.get("doc_info")
-    if mem is None or not info:
+    if mem is None:
         return
     try:
+        info = mem.register(document, st.session_state.get("doc_bytes"), _reviewer() or None,
+                            st.session_state.get("doc_ext") or ".pdf")
         mem.record_analysis(session, info, _reviewer() or None, backend.model_description)
     except Exception as exc:  # noqa: BLE001 - the review still works; it just isn't kept
         log.exception("Recording the analysis failed")
@@ -579,7 +604,7 @@ def page_analyze(backend) -> None:
 
         with st.container(border=True):
             _document_summary(doc)
-            _render_version_note(backend, st.session_state.doc_info)
+            _render_version_note(backend, _lookup_document(backend, doc))
             selected = _section_picker(doc)
 
         current = st.session_state.review_session
@@ -595,7 +620,7 @@ def page_analyze(backend) -> None:
             session = _run_analysis(backend, doc, selected)
             if session is not None and session.run.ok_threads:
                 session.two_person = two_person_rule()
-                _record_analysis(backend, session)
+                _record_analysis(backend, session, doc)
                 st.session_state.review_session = session
                 st.session_state.inline = {}
                 st.session_state.pop("_stale", None)
@@ -1056,12 +1081,16 @@ def _render_finalize(backend, session, reviewer: str) -> None:
         except review.ReviewError as exc:
             st.error(escape_md(str(exc)))
             return
-        _persist(session)
         if errors:
             listed = "\n".join(f"- {escape_md(error)}" for error in errors)
             st.error("Some sections couldn't be resumed, so the review isn't finalized yet. "
                      f"Select Finalize review again to retry.\n\n{listed}")
             return
+        if not _persist(session):
+            # The ledger didn't accept the sign-off (someone changed the review meanwhile), so it
+            # didn't happen: no report, and the notice at the top offers to reopen the latest version.
+            review.undo_unsaved_sign_off(session)
+            st.rerun()
         go_to(REPORT, "Review finalized. The signed report is ready.")
 
 

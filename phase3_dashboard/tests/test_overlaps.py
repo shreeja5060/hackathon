@@ -119,3 +119,13 @@ def test_the_qa_agent_reads_the_other_policies_as_citable_evidence(qa_agent):
     evidence = next(r["content"] for r in tool_results if "Policy text the finding cites" in r["content"])
     assert "other reviewed policies say about the same control" in evidence
     assert "Sets a different value" in evidence and "Company laptops must lock after 5 minutes" in evidence
+
+
+def test_articles_are_not_read_as_numbers():
+    assert value_conflict_free("lock after a 15 minute period", "lock after 15 minutes")
+    assert value_conflict_free("report within an hour", "report within 60 minutes")
+    assert {k: set(v) for k, v in overlaps.quantities("a 14 character minimum").items()} == {"length": {14.0}}
+
+
+def value_conflict_free(a, b):
+    return overlaps.value_conflict(a, b) is None

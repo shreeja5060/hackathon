@@ -89,7 +89,7 @@ to see how a bad model reply is handled; there is no switch for it in the UI.
 python -m pytest phase3_dashboard/tests -q      # from the repo root
 ```
 
-146 tests, run by CI on every push (`.github/workflows/phase3-tests.yml`). They
+154 tests, run by CI on every push (`.github/workflows/phase3-tests.yml`). They
 include headless runs of the whole app and end-to-end runs through the real
 Phase 1 chunker, Phase 2 agents and LangGraph pipeline and Anu's `qa_agent`,
 in the UI too: upload, analyze, ask for wording, use it, approve, sign off.
@@ -118,7 +118,7 @@ backends/
   sample_data.py     invented sample policies and simulated control summaries
 ui/components.py     header, coverage bar, review queue, finding detail, chat pieces
 static/fonts/        Public Sans and IBM Plex Mono (OFL), served locally
-tests/               146 tests, including live end-to-end runs with the Q&A agent
+tests/               154 tests, including live end-to-end runs with the Q&A agent
 .streamlit/          theme, fonts and server settings
 ../policy_writer/    the starter policy writer: NIST-grounded topics and clauses, AI drafting
 ../deploy/           Cloud Run start script and Litestream config for the ledger

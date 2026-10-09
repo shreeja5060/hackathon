@@ -20,6 +20,13 @@ Two-person approval (maker / checker)
   approve_first(...)  a first reviewer approves  -> "awaiting_second_approval"
   approve_final(...)  a DIFFERENT person confirms -> "approved"
   reject(...)         anyone rejects, with a note -> "rejected"
+  rejection_confirmed  a DIFFERENT person confirms a rejection (written through append())
+  review_signed        sign-off: refused while a finding is undecided or, for a run recorded with
+                       the two-person rule, unconfirmed; after it, the run's decisions are locked
+
+append(entries, run_id, expect_last_decision) writes several entries in one transaction and
+checks these rules inside it, so two sessions can't interleave: a page that is out of date is
+refused (StaleWrite) instead of overwriting a newer decision.
 
 Memory across versions
   compare_versions()  which sections are unchanged / changed / added / removed
@@ -28,9 +35,10 @@ Memory across versions
 What it does not do: it does not verify who a person is. Names are recorded as
 given. Real sign-in would be needed for that.
 
-Not connected to the dashboard yet. The dashboard would call register_document()
-on upload, record_run() after an analysis, and record_event()/approve_*() for
-each decision. Run `python shared/ledger.py demo` to see it work on demo data.
+Connected to the dashboard by phase3_dashboard/core/memory.py: it calls
+register_document() and record_run() when a policy is analyzed, and append() for
+each batch of review actions. Run `python shared/ledger.py demo` to see it work
+on demo data.
 """
 
 from __future__ import annotations
@@ -92,6 +100,17 @@ CREATE TABLE IF NOT EXISTS events (
 
 class ApprovalError(ValueError):
     """An approval step that the rules do not allow."""
+
+
+class StaleWrite(RuntimeError):
+    """The review changed since the caller read it; nothing was written."""
+
+
+def same_person(a, b) -> bool:
+    """Names compared ignoring case and spacing ("rashmi " is Rashmi)."""
+    def key(name):
+        return " ".join(str(name or "").split()).casefold()
+    return bool(key(a)) and key(a) == key(b)
 
 
 def _now() -> str:
@@ -266,47 +285,130 @@ class Ledger:
 
     # ---- two-person approval ---------------------------------------------------
 
-    def finding_state(self, run_id: int, finding_id: str) -> dict:
-        """pending -> awaiting_second_approval -> approved, or rejected. The latest decision wins.
+    # Actions that change a decision. Anything else (e.g. an assistant's suggestion) is commentary.
+    DECISIONS = ("approved_first", "approved_final", "rejected", "rejection_confirmed", "reopened", "review_signed")
 
-        "reopened" (a decision undone, or sent back by the second reviewer) returns it to pending.
-        """
-        fresh = {"state": "pending", "first_approver": None, "final_approver": None, "rejected_by": None}
+    @staticmethod
+    def _state_from(rows) -> dict:
+        fresh = {"state": "pending", "first_approver": None, "final_approver": None, "rejected_by": None,
+                 "rejection_confirmed_by": None}
         state = dict(fresh)
-        for e in self.events(run_id=run_id, finding_id=finding_id):
+        for e in rows:
             if e["action"] == "approved_first":
-                state.update(state="awaiting_second_approval", first_approver=e["actor"],
-                             final_approver=None, rejected_by=None)
+                state = dict(fresh, state="awaiting_second_approval", first_approver=e["actor"])
             elif e["action"] == "approved_final":
                 state.update(state="approved", final_approver=e["actor"], rejected_by=None)
             elif e["action"] == "rejected":
-                state.update(state="rejected", rejected_by=e["actor"])
-            elif e["action"] == "reopened":
+                state = dict(fresh, state="rejected", rejected_by=e["actor"])
+            elif e["action"] == "rejection_confirmed":
+                state["rejection_confirmed_by"] = e["actor"]
+            elif e["action"] == "reopened":  # a decision undone, or sent back by the second reviewer
                 state = dict(fresh)
         return state
 
+    def _state(self, db, run_id, finding_id) -> dict:
+        rows = db.execute("SELECT actor, action FROM events WHERE run_id = ? AND finding_id = ? ORDER BY seq",
+                          (run_id, finding_id)).fetchall()
+        return self._state_from(rows)
+
+    def finding_state(self, run_id: int, finding_id: str) -> dict:
+        """pending -> awaiting_second_approval -> approved, or rejected (then confirmed). The latest decision wins.
+
+        "reopened" (a decision undone, or sent back by the second reviewer) returns it to pending.
+        """
+        with self._db() as db:
+            return self._state(db, run_id, finding_id)
+
+    def _check(self, db, actor, action, run_id, finding_id, detail) -> None:
+        """The rules, checked inside the same transaction as the write, so no other session can slip in between."""
+        if run_id is None or action not in self.DECISIONS:
+            return
+        if db.execute("SELECT 1 FROM events WHERE run_id = ? AND action = 'review_signed'", (run_id,)).fetchone():
+            raise ApprovalError(f"review {run_id} is already signed off; its decisions are locked")
+        if action == "review_signed":
+            self._check_sign_off(db, run_id)
+            return
+        if not db.execute("SELECT 1 FROM findings WHERE run_id = ? AND finding_id = ?", (run_id, finding_id)).fetchone():
+            raise ApprovalError(f"unknown finding {finding_id!r} in run {run_id}")
+        if action == "rejected" and not str((detail or {}).get("note") or "").strip():
+            raise ApprovalError("a rejection needs a note")
+        if action == "approved_final":
+            state = self._state(db, run_id, finding_id)
+            if state["state"] != "awaiting_second_approval":
+                raise ApprovalError(f"{finding_id} is '{state['state']}'; it needs a first approval before a second one")
+            if same_person(actor, state["first_approver"]):
+                raise ApprovalError("a different person must give the second approval")
+        if action == "rejection_confirmed":
+            state = self._state(db, run_id, finding_id)
+            if state["state"] != "rejected" or state["rejection_confirmed_by"]:
+                raise ApprovalError(f"{finding_id} has no unconfirmed rejection")
+            if same_person(actor, state["rejected_by"]):
+                raise ApprovalError("a different person must confirm the rejection")
+
+    def _check_sign_off(self, db, run_id) -> None:
+        """Every finding decided; under the two-person rule (recorded with the run), every decision confirmed."""
+        head = db.execute("SELECT detail FROM events WHERE run_id = ? AND action = 'analysis_run' ORDER BY seq LIMIT 1",
+                          (run_id,)).fetchone()
+        two_person = bool(json.loads(head["detail"]).get("two_person")) if head else False
+        open_items = []
+        for row in db.execute("SELECT finding_id FROM findings WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall():
+            state = self._state(db, run_id, row["finding_id"])
+            if state["state"] == "pending" or (two_person and (
+                    state["state"] == "awaiting_second_approval"
+                    or (state["state"] == "rejected" and not state["rejection_confirmed_by"]))):
+                open_items.append(row["finding_id"])
+        if open_items:
+            raise ApprovalError(f"{len(open_items)} finding(s) still need a decision or a second reviewer "
+                                f"({', '.join(open_items[:5])})")
+
+    def last_decision_seq(self, run_id) -> int:
+        """The newest decision entry for a run (0 if none): what a page compares to see if it is out of date."""
+        with self._db() as db:
+            return self._last_decision(db, run_id)
+
+    def _last_decision(self, db, run_id) -> int:
+        marks = ",".join("?" * len(self.DECISIONS))
+        row = db.execute(f"SELECT MAX(seq) AS s FROM events WHERE run_id = ? AND action IN ({marks})",
+                         (run_id, *self.DECISIONS)).fetchone()
+        return row["s"] or 0
+
+    def append(self, entries: list[dict], run_id=None, expect_last_decision=None) -> list[int]:
+        """Write several trail entries in ONE transaction, all or nothing.
+
+        Each entry: {"actor", "action", "finding_id"?, "role"?, "detail"?, "ts"?, "run_id"?}.
+        With expect_last_decision, refuse (StaleWrite) if someone else recorded a decision on the run
+        since the caller last read it. The two-person rule and the other checks run inside the same
+        transaction, so a page that is out of date can't confirm its own decision or sign off over a
+        change it hasn't seen.
+        """
+        with self._db(write=True) as db:
+            if expect_last_decision is not None:
+                latest = self._last_decision(db, run_id)
+                if latest != expect_last_decision:
+                    raise StaleWrite(f"review {run_id} changed since it was read (entry {latest}, "
+                                     f"expected {expect_last_decision})")
+            seqs = []
+            for entry in entries:
+                actor = str(entry.get("actor") or "").strip()
+                if not actor:
+                    raise ValueError("an event needs an actor (who did it)")
+                target_run = entry.get("run_id", run_id)
+                self._check(db, actor, entry["action"], target_run, entry.get("finding_id"), entry.get("detail"))
+                seqs.append(self._append(db, actor, entry["action"], target_run, entry.get("finding_id"),
+                                         entry.get("role"), entry.get("detail"), entry.get("ts")))
+            return seqs
+
     def approve_first(self, actor, run_id, finding_id, note=None) -> int:
-        self._require_finding(run_id, finding_id)
-        return self.record_event(actor, "approved_first", run_id, finding_id, "reviewer", {"note": note})
+        return self.append([{"actor": actor, "action": "approved_first", "finding_id": finding_id,
+                             "role": "reviewer", "detail": {"note": note}}], run_id=run_id)[0]
 
     def approve_final(self, actor, run_id, finding_id, note=None) -> int:
-        self._require_finding(run_id, finding_id)
-        state = self.finding_state(run_id, finding_id)
-        if state["state"] != "awaiting_second_approval":
-            raise ApprovalError(f"{finding_id} is '{state['state']}'; it needs a first approval before a second one")
-        if str(actor).strip().lower() == str(state["first_approver"]).strip().lower():
-            raise ApprovalError("a different person must give the second approval")
-        return self.record_event(actor, "approved_final", run_id, finding_id, "approver", {"note": note})
+        return self.append([{"actor": actor, "action": "approved_final", "finding_id": finding_id,
+                             "role": "approver", "detail": {"note": note}}], run_id=run_id)[0]
 
     def reject(self, actor, run_id, finding_id, note) -> int:
-        self._require_finding(run_id, finding_id)
-        if not note or not str(note).strip():
-            raise ApprovalError("a rejection needs a note")
-        return self.record_event(actor, "rejected", run_id, finding_id, "reviewer", {"note": note})
-
-    def _require_finding(self, run_id, finding_id):
-        if not self._finding_exists(run_id, finding_id):
-            raise ApprovalError(f"unknown finding {finding_id!r} in run {run_id}")
+        return self.append([{"actor": actor, "action": "rejected", "finding_id": finding_id,
+                             "role": "reviewer", "detail": {"note": note}}], run_id=run_id)[0]
 
     # ---- memory across versions ------------------------------------------------
 

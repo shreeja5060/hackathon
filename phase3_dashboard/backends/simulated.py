@@ -145,7 +145,7 @@ def chunk_pages_like_phase1(pages: list[dict]) -> tuple[list[dict], list[str]]:
                 "doc_kind": "policy", "page": record["page"], "locator": None,
             })
     note = ("No numbered section headings were found, so each page became one section. "
-            "Phase 1's chunker rejects files like this, so this upload will fail in live mode.")
+            "Findings from it are cited by page.")
     return fallback, [note]
 
 

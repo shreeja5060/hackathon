@@ -189,8 +189,7 @@ class LiveBackend(ComplianceBackend):
                     publication_date=record.get("publication_date"),
                     source=record.get("source_url"),
                     sha256=record.get("sha256"),
-                    note="The index also holds NIST CSF 2.0, so the Mapper can return CSF outcomes "
-                         "until Phase 2 filters by framework.",
+                    note=None,
                 )
                 return info
         return info

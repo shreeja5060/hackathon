@@ -117,6 +117,18 @@ def test_rejection_needs_a_note_and_overrides_earlier_approval(ledger, run):
     assert (state["state"], state["rejected_by"]) == ("rejected", "Mahsa")
 
 
+def test_reopening_returns_a_decision_to_pending(ledger, run):
+    ledger.approve_first("Rashmi", run, "F001")
+    ledger.record_event("Anu", "reopened", run, "F001", "approver", {"note": "wording too vague"})
+    state = ledger.finding_state(run, "F001")
+    assert (state["state"], state["first_approver"]) == ("pending", None)
+    with pytest.raises(ApprovalError, match="first approval"):
+        ledger.approve_final("Anu", run, "F001")             # nothing to confirm any more
+    ledger.approve_first("Mahsa", run, "F001")
+    ledger.approve_final("Anu", run, "F001")
+    assert ledger.finding_state(run, "F001")["state"] == "approved"
+
+
 def test_a_refused_approval_leaves_no_trace_in_the_trail(ledger, run):
     before = len(ledger.events(run_id=run))
     with pytest.raises(ApprovalError):

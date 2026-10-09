@@ -78,8 +78,14 @@ def test_export_stays_locked_until_finalized(app):
     assert any("unlocks once the review is finalized" in i.value for i in app.info)
 
 
-def test_failing_section_is_shown_and_others_still_run(app):
-    app.toggle(key="sim_fail").set_value(True).run()
+def test_failing_section_is_shown_and_others_still_run(monkeypatch):
+    # The switch for this is a developer setting now (not shown in the UI), so set it before the app starts.
+    monkeypatch.setenv("COPILOT_SIM_FAIL_SECTION", "1")
+    monkeypatch.setenv("COPILOT_SIM_DELAY", "0")
+    monkeypatch.setenv("COPILOT_BACKEND", "simulated")
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    assert not [t for t in app.toggle if t.key == "sim_fail"]  # no test switch in the demo UI
     session = run_sample_analysis(app)
     assert len(session.run.section_errors) == 1
     # AppTest lists an expander that has an icon under .status, so check both.

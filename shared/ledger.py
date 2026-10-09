@@ -230,8 +230,12 @@ class Ledger:
     # ---- two-person approval ---------------------------------------------------
 
     def finding_state(self, run_id: int, finding_id: str) -> dict:
-        """pending -> awaiting_second_approval -> approved, or rejected. The latest decision wins."""
-        state = {"state": "pending", "first_approver": None, "final_approver": None, "rejected_by": None}
+        """pending -> awaiting_second_approval -> approved, or rejected. The latest decision wins.
+
+        "reopened" (a decision undone, or sent back by the second reviewer) returns it to pending.
+        """
+        fresh = {"state": "pending", "first_approver": None, "final_approver": None, "rejected_by": None}
+        state = dict(fresh)
         for e in self.events(run_id=run_id, finding_id=finding_id):
             if e["action"] == "approved_first":
                 state.update(state="awaiting_second_approval", first_approver=e["actor"],
@@ -240,6 +244,8 @@ class Ledger:
                 state.update(state="approved", final_approver=e["actor"], rejected_by=None)
             elif e["action"] == "rejected":
                 state.update(state="rejected", rejected_by=e["actor"])
+            elif e["action"] == "reopened":
+                state = dict(fresh)
         return state
 
     def approve_first(self, actor, run_id, finding_id, note=None) -> int:

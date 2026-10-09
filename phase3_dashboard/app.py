@@ -95,10 +95,18 @@ def _sim_delay() -> float:
         return 0.3
 
 
+def _sim_failing_section() -> int | None:
+    """Developer option: COPILOT_SIM_FAIL_SECTION=1 makes the simulator's second section fail
+    like a malformed model reply, to exercise the error handling. Not shown in the UI."""
+    value = os.getenv("COPILOT_SIM_FAIL_SECTION", "").strip()
+    return int(value) if value.isdigit() else None
+
+
 def get_backend(mode: str):
     cache = st.session_state.backends
     if mode not in cache:  # failures aren't cached, so fixing the cause and rerunning works
-        options = {"delay": _sim_delay()} if mode == "simulated" else {}
+        options = ({"delay": _sim_delay(), "fail_section_index": _sim_failing_section()}
+                   if mode == "simulated" else {})
         cache[mode] = create_backend(mode, **options)
     return cache[mode]
 
@@ -155,14 +163,6 @@ def render_sidebar():
                            icon=":material/warning:")
             else:
                 st.caption(f"Retrieval: {escape_md(retrieval)}")
-        else:
-            with st.expander("Simulator options"):
-                failing = st.toggle(
-                    "Simulate a failing section",
-                    key="sim_fail",
-                    help="Makes the second section fail the way a malformed model reply would.",
-                )
-                backend.set_failing_section(1 if failing else None)
 
         st.divider()
         if st.button("Start over", key="start_over", icon=":material/restart_alt:",

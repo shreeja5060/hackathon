@@ -170,7 +170,7 @@ def test_pdf_without_numbered_headings_falls_back_to_pages():
         {"source": "x.pdf", "page": 2, "text": "Backups should run nightly."},
     ])
     assert [c["page"] for c in chunks] == [1, 2] and all(c["locator"] is None for c in chunks)
-    assert notes and "live mode" in notes[0]
+    assert notes and "each page became one section" in notes[0]
 
 
 def test_sample_data_is_consistent():

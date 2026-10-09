@@ -198,8 +198,12 @@ class Ledger:
             return {"id": cur.lastrowid, "name": name, "version": version, "sha256": sha,
                     "already_seen": False, "is_new_version": previous is not None, "previous_version": previous}
 
-    def record_run(self, document_id: int, findings: list[dict], backend=None, model=None, actor="system") -> int:
-        """Remember an analysis and all its findings. Returns the run id."""
+    def record_run(self, document_id: int, findings: list[dict], backend=None, model=None, actor="system",
+                   detail=None) -> int:
+        """Remember an analysis and all its findings. Returns the run id.
+
+        detail: optional extra facts about the run (e.g. the sections analyzed), kept in its trail entry.
+        """
         with self._db(write=True) as db:
             run_id = db.execute("INSERT INTO runs (document_id, created_at, backend, model) VALUES (?,?,?,?)",
                                 (document_id, _now(), backend, model)).lastrowid
@@ -212,7 +216,7 @@ class Ledger:
                      citation.get("locator"), f.get("requirement"), f.get("framework_control"),
                      f.get("coverage"), _canon(f)))
             self._append(db, actor, "analysis_run", run_id=run_id, role="system",
-                         detail={"findings": len(findings), "backend": backend, "model": model})
+                         detail={**(detail or {}), "findings": len(findings), "backend": backend, "model": model})
             return run_id
 
     def latest_run(self, name: str, version=None):
@@ -221,6 +225,39 @@ class Ledger:
         with self._db() as db:
             row = db.execute(sql, (name, version) if version is not None else (name,)).fetchone()
         return row["id"] if row else None
+
+    # ---- reading back (the dashboard's library, and reopening a stored review) ----
+
+    def documents(self, name=None) -> list[dict]:
+        """Every stored document version, oldest first."""
+        sql = "SELECT * FROM documents" + (" WHERE name = ?" if name is not None else "") + " ORDER BY id"
+        with self._db() as db:
+            rows = db.execute(sql, (name,) if name is not None else ()).fetchall()
+        return [{"id": r["id"], "name": r["name"], "version": r["version"], "sha256": r["sha256"],
+                 "created_at": r["created_at"]} for r in rows]
+
+    def runs(self, document_name=None) -> list[dict]:
+        """Every analysis, oldest first, with its document's name and version."""
+        sql = ("SELECT r.*, d.name AS document, d.version AS version, d.id AS doc_id FROM runs r "
+               "JOIN documents d ON d.id = r.document_id"
+               + (" WHERE d.name = ?" if document_name is not None else "") + " ORDER BY r.id")
+        with self._db() as db:
+            rows = db.execute(sql, (document_name,) if document_name is not None else ()).fetchall()
+        return [{"id": r["id"], "document_id": r["doc_id"], "document": r["document"], "version": r["version"],
+                 "created_at": r["created_at"], "backend": r["backend"], "model": r["model"]} for r in rows]
+
+    def run_findings(self, run_id) -> list[dict]:
+        """One run's findings exactly as they were recorded (the stored snapshots), in order."""
+        with self._db() as db:
+            rows = db.execute("SELECT snapshot FROM findings WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+        return [json.loads(r["snapshot"]) for r in rows]
+
+    def last_seq(self, run_id=None) -> int:
+        """The newest trail entry, for one run or overall; 0 when there is none."""
+        sql = "SELECT MAX(seq) AS s FROM events" + (" WHERE run_id = ?" if run_id is not None else "")
+        with self._db() as db:
+            row = db.execute(sql, (run_id,) if run_id is not None else ()).fetchone()
+        return row["s"] or 0
 
     def _finding_exists(self, run_id, finding_id) -> bool:
         with self._db() as db:

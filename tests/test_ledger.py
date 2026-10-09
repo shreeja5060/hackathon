@@ -129,6 +129,19 @@ def test_reopening_returns_a_decision_to_pending(ledger, run):
     assert ledger.finding_state(run, "F001")["state"] == "approved"
 
 
+def test_documents_runs_and_snapshots_can_be_read_back(ledger, run):
+    v2 = ledger.register_document(NAME, "v2 text")
+    run2 = ledger.record_run(v2["id"], [_finding("F001", "s-c", "Section 1")], backend="sim", model="rules",
+                             detail={"sections": 1})
+    assert [(d["name"], d["version"]) for d in ledger.documents()] == [(NAME, 1), (NAME, 2)]
+    assert [(r["id"], r["version"], r["backend"]) for r in ledger.runs(NAME)] == [(run, 1, None), (run2, 2, "sim")]
+    assert [f["finding_id"] for f in ledger.run_findings(run)] == ["F001", "F002"]    # in recorded order
+    assert ledger.run_findings(run)[0]["citation"]["locator"] == "Section 3.5"
+    entry = ledger.events(run_id=run2)[-1]
+    assert entry["action"] == "analysis_run" and entry["detail"]["sections"] == 1 and entry["detail"]["findings"] == 1
+    assert ledger.last_seq(run2) == entry["seq"] == ledger.last_seq() and ledger.last_seq(999) == 0
+
+
 def test_a_refused_approval_leaves_no_trace_in_the_trail(ledger, run):
     before = len(ledger.events(run_id=run))
     with pytest.raises(ApprovalError):

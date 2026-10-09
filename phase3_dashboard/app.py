@@ -62,7 +62,7 @@ PROMPTS_GENERAL = (
 PROMPTS_REVIEW = (
     "Which findings have Missing coverage?",
     "Suggest stronger wording for the Partial findings",
-    "Suggest better wording for the rejected findings",
+    "Do our other policies cover or contradict these findings?",
 )
 _OFF = {"off", "0", "false", "no"}
 KEEP_WIDGET_STATE = ("policy_origin", "loaded_policy", "writer_org", "writer_size", "writer_sector", "writer_it",
@@ -608,8 +608,23 @@ def page_analyze(backend) -> None:
 
 # ====================================================================== assistant (shared)
 
+RELATED_FIELDS = ("policy", "locator", "coverage", "requirement_text", "kind", "detail", "run_id", "finding_id",
+                  "same_policy")
+
+
 def _review_context() -> list[dict]:
-    return review.assistant_context(st.session_state.review_session)
+    """The review's findings for the assistant, each with what the organization's other policies say."""
+    session = st.session_state.review_session
+    context = review.assistant_context(session)
+    statements = _statements_for(session) if session is not None else []
+    if statements:
+        by_id = {f.finding_id: f for f in session.findings}
+        for item in context:
+            finding = by_id.get(item["finding_id"])
+            if finding is not None and finding.framework_control:
+                related = overlaps.related(_overlap_focus(session, finding), statements)[:4]
+                item["related_policies"] = [{k: r.get(k) for k in RELATED_FIELDS} for r in related]
+    return context
 
 
 def _chat_history() -> list[dict]:
@@ -954,14 +969,17 @@ def _statements_for(session) -> list[dict]:
     return statements
 
 
+def _overlap_focus(session, finding) -> dict:
+    return {"policy": (session.document_record or {}).get("name") or session.run.policy_source,
+            "run_id": session.ledger_run_id, "finding_id": finding.finding_id,
+            "control": finding.framework_control, "coverage": finding.coverage,
+            "requirement_text": finding.requirement_text, "locator": finding.citation.locator}
+
+
 def _render_related(session, finding) -> None:
     if not finding.framework_control or session.ledger_run_id is None:
         return
-    focus = {"policy": (session.document_record or {}).get("name") or session.run.policy_source,
-             "run_id": session.ledger_run_id, "finding_id": finding.finding_id,
-             "control": finding.framework_control, "coverage": finding.coverage,
-             "requirement_text": finding.requirement_text, "locator": finding.citation.locator}
-    items = overlaps.related(focus, _statements_for(session))
+    items = overlaps.related(_overlap_focus(session, finding), _statements_for(session))
     ui.render_related(items, finding.framework_control)
 
 

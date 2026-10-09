@@ -82,3 +82,40 @@ def test_rejected_findings_are_not_compared(sim_backend, tmp_path):
     review.reject(session, lock.finding_id, "Mahsa", "The 5 minutes was a typo")
     mem.sync(session)
     assert "AC-11" not in {s["control"] for s in mem.statements()}
+
+
+# ---------------------------------------------------------------- the assistant knows the other policies
+
+RELATED = [{"policy": "SAMPLE_Remote_Work_Policy_injection_demo.pdf", "locator": "Section 4 Equipment",
+            "coverage": "Full", "requirement_text": "Company laptops must lock after 5 minutes of inactivity.",
+            "kind": "conflict", "detail": "15 minutes here, 5 minutes there", "run_id": 2, "finding_id": "F-004",
+            "same_policy": False}]
+
+
+def test_the_simulated_assistant_answers_from_the_other_policies(sim_backend, sample_session):
+    from phase3_dashboard.core.contracts import normalize_chat_answer
+
+    context = review.assistant_context(sample_session)
+    lock = next(item for item in context if item["framework_control"] == "AC-11")
+    lock["related_policies"] = RELATED
+    reply = normalize_chat_answer(sim_backend.ask(f"Is {lock['finding_id']} covered elsewhere?", findings=context))
+    assert "Remote_Work" in reply.answer and "15 minutes here, 5 minutes there" in reply.answer
+    assert reply.citations[0]["text"].startswith("Company laptops must lock")
+    general = normalize_chat_answer(sim_backend.ask("Do our other policies cover or contradict these findings?",
+                                                    findings=context))
+    assert lock["finding_id"] in general.answer and general.citations
+
+
+def test_the_qa_agent_reads_the_other_policies_as_citable_evidence(qa_agent):
+    finding = {"finding_id": "F-010", "requirement": "Automatic device lock", "coverage": "Full",
+               "framework_control": "AC-11", "status": "pending", "finding": "Clear.",
+               "requirement_text": "Workstations must lock automatically after 15 minutes of inactivity.",
+               "citation": {"chunk_id": "policy-x", "source": "Computer Security Policy.pdf",
+                            "locator": "Section 3.7 Device Lock"},
+               "cited_text": "3.7 Device Lock\n\nWorkstations must lock automatically after 15 minutes.",
+               "related_policies": RELATED}
+    qa_agent.ask("Does another policy contradict F-010?", findings=[finding])
+    tool_results = qa_agent.calls[1]["messages"][-1]["content"]
+    evidence = next(r["content"] for r in tool_results if "Policy text the finding cites" in r["content"])
+    assert "other reviewed policies say about the same control" in evidence
+    assert "Sets a different value" in evidence and "Company laptops must lock after 5 minutes" in evidence

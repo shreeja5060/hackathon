@@ -458,3 +458,18 @@ def test_everything_still_works_with_memory_off(monkeypatch):
     assert not at.exception
     at.segmented_control(key="nav").set_value("Library").run()
     assert any("library is off" in w.value for w in at.warning)
+
+
+def test_the_assistant_answers_overlap_questions_from_the_library(monkeypatch):
+    at = fresh_app(monkeypatch)
+    run_sample_analysis(at, reviewer="Mahsa")
+    at.segmented_control(key="nav").set_value("Analyze").run()
+    at.selectbox(key="loaded_policy").set_value("SAMPLE_Remote_Work_Policy_injection_demo.pdf").run()
+    at.button(key="run_analysis").click().run()
+    at.segmented_control(key="nav").set_value("Assistant").run()
+    chip = next(b for b in at.button if b.label == "Do our other policies cover or contradict these findings?")
+    chip.click().run()
+    assert not at.exception
+    reply = at.session_state["chat"][-1]
+    assert "Computer_Security_Policy" in reply["content"] and reply["citations"]
+    assert "5 minutes here, 15 minutes there" in reply["content"]

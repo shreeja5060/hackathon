@@ -32,6 +32,8 @@ ACTION_LABELS = {
     "assistant_suggested": "Assistant suggested wording",
     "rejected": "Rejected",
     "reopened": "Reopened",
+    "confirmed": "Confirmed by a second reviewer",
+    "sent_back": "Sent back by the second reviewer",
     "finalized": "Finalized and signed off",
 }
 
@@ -77,6 +79,11 @@ def build_report(session: ReviewSession) -> dict[str, Any]:
             "finalized_at": session.finalized_at,
             "approved": c["status"]["approved"],
             "rejected": c["status"]["rejected"],
+            "two_person": session.two_person,
+            "confirmed": c["confirmed"],
+            "ledger_run_id": session.ledger_run_id,
+            "document_version": (session.document_record or {}).get("version"),
+            "document_sha256": (session.document_record or {}).get("sha256"),
         },
         "summary": {
             "approved_by_coverage": {
@@ -111,6 +118,8 @@ def _finding_record(finding) -> dict[str, Any]:
         "reviewer": finding.reviewer,
         "reviewed_at": finding.reviewed_at,
         "reviewer_note": finding.reviewer_note or None,
+        "confirmed_by": finding.confirmed_by,
+        "confirmed_at": finding.confirmed_at,
     }
     if finding.recommendation_edited is not None:
         record["recommendation_ai_original"] = finding.recommendation
@@ -145,11 +154,22 @@ def to_markdown(report: dict[str, Any]) -> str:
     title = framework.get("title") or "NIST SP 800-53"
     version = framework.get("version")
     framework_line = title if version and version in title else f"{title}, version {version or 'unknown'}"
+    policy_line = _md(report['policy']['source'])
+    if review.get("document_version"):
+        policy_line += f", version {review['document_version']}"
     lines += [
-        f"- **Policy:** {_md(report['policy']['source'])}",
+        f"- **Policy:** {policy_line}",
         f"- **Framework:** {_md(framework_line)}",
         f"- **Signed off by:** {_md(review['finalized_by'])}, {_when(review['finalized_at'])}",
         f"- **Decisions:** {review['approved']} approved, {review['rejected']} rejected",
+    ]
+    if review.get("two_person"):
+        lines.append(f"- **Two-person rule:** every decision confirmed by a second reviewer "
+                     f"({review['confirmed']} confirmations)")
+    if review.get("ledger_run_id"):
+        lines.append(f"- **Permanent record:** ledger review {review['ledger_run_id']}"
+                     + (f", document SHA-256 {review['document_sha256'][:12]}…" if review.get("document_sha256") else ""))
+    lines += [
         f"- **Generated:** {_when(report['generated_at'])}",
         "",
         f"_{escape_md(report['notice'])}_",
@@ -196,6 +216,8 @@ def to_markdown(report: dict[str, Any]) -> str:
                 f"- **Source:** {_md(_source(f['citation']))}",
                 f"- **Approved by:** {_md(f['reviewer'])}, {_when(f['reviewed_at'])}",
             ]
+            if f.get("confirmed_by"):
+                lines.append(f"- **Confirmed by:** {_md(f['confirmed_by'])}, {_when(f['confirmed_at'])}")
             if f["clarifying_questions"]:
                 lines.append(f"- **Questions raised:** {_md(' / '.join(f['clarifying_questions']))}")
             if f["reviewer_note"]:
@@ -238,7 +260,8 @@ def _csv_cell(value) -> Any:
 CSV_COLUMNS = (
     "id", "requirement", "coverage", "framework_control", "finding", "plain_language", "recommendation",
     "recommendation_edited_by_reviewer", "recommendation_origin", "source", "locator", "page",
-    "reviewer", "reviewed_at", "reviewer_note", "requirement_text", "clarifying_questions",
+    "reviewer", "reviewed_at", "reviewer_note", "confirmed_by", "confirmed_at", "requirement_text",
+    "clarifying_questions",
 )
 
 

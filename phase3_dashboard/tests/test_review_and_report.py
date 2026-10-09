@@ -102,8 +102,10 @@ def test_finalize_sends_every_decision_back_to_its_paused_run(sim_backend, sampl
     assert sample_session.finalized and sample_session.finalized_by == REVIEWER
     assert set(sent) == set(sample_session.run.ok_threads)  # runs with zero findings are closed too
 
-    assert sent[rejected.thread_id][rejected.source_finding_id] == {"decision": "rejected"}
-    assert sent[edited.thread_id][edited.source_finding_id] == {"decision": "approved", "recommendation": "Edited text."}
+    # The reviewer's name travels with each decision, so Phase 2 can record who decided.
+    assert sent[rejected.thread_id][rejected.source_finding_id] == {"decision": "rejected", "reviewer": REVIEWER}
+    assert sent[edited.thread_id][edited.source_finding_id] == {
+        "decision": "approved", "reviewer": REVIEWER, "recommendation": "Edited text."}
     total = sum(len(d) for d in sent.values())
     assert total == len(sample_session.findings)
 

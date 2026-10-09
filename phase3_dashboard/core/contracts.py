@@ -100,10 +100,21 @@ class Finding:
     recommendation_edited: str | None = None
     recommendation_origin: str | None = None  # "reviewer" or "assistant" when the approved text isn't the agents'
     assistant_suggestion: str | None = None  # latest wording the Q&A assistant proposed; never applied by itself
+    confirmed_by: str | None = None  # the second reviewer who confirmed the decision (two-person rule)
+    confirmed_at: str | None = None
+    confirmation_note: str = ""
 
     @property
     def approvable(self) -> bool:
         return not self.problems
+
+    @property
+    def decided(self) -> bool:
+        return self.status != "pending"
+
+    @property
+    def confirmed(self) -> bool:
+        return self.decided and self.confirmed_by is not None
 
     @property
     def final_recommendation(self) -> str | None:

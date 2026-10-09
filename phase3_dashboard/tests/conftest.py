@@ -24,6 +24,17 @@ def make_pdf(pages: list[str]) -> bytes:
     return data
 
 
+@pytest.fixture(autouse=True)
+def isolated_memory(monkeypatch, tmp_path):
+    """Every test gets its own empty ledger, and the single-reviewer setup unless it turns the rule on."""
+    monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+    monkeypatch.setenv("COPILOT_DOCUMENT_DIR", str(tmp_path / "documents"))
+    monkeypatch.setenv("COPILOT_TWO_PERSON", "off")
+    monkeypatch.delenv("COPILOT_MEMORY", raising=False)
+    monkeypatch.delenv("COPILOT_IDENTITY", raising=False)
+    return tmp_path
+
+
 @pytest.fixture
 def sim_backend():
     from phase3_dashboard.backends.simulated import SimulatedBackend

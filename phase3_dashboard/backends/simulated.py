@@ -219,7 +219,7 @@ _SPECIFIC = re.compile(
     r"\b(?:\d+|annual(?:ly)?|quarterly|monthly|weekly|daily|immediately|at least|within|no later than)\b", re.I
 )
 _TOPICS = tuple((re.compile(pattern, re.I), name, control) for pattern, name, control in data.TOPIC_RULES)
-MAX_REQUIREMENTS_PER_CHUNK = 4
+MAX_REQUIREMENTS_PER_CHUNK = 8
 
 
 def match_topic(text: str):
@@ -574,9 +574,14 @@ class SimulatedBackend(ComplianceBackend):
 
     retrieval_backend = "simulator (keyword rules)"
     placeholder_retrieval = False
+    model_description = "keyword rules (simulator, no AI)"
 
     def set_failing_section(self, index: int | None) -> None:
         self.pipeline.fail_section_index = index
+
+    def is_paused(self, thread_id: str) -> bool:
+        with self.pipeline._lock:
+            return thread_id in self.pipeline._threads
 
     def run_section(self, chunk: dict, thread_id: str) -> dict:
         return {**super().run_section(chunk, thread_id), "retrieval_backend": self.retrieval_backend}

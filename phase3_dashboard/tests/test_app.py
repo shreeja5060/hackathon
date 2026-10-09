@@ -329,3 +329,132 @@ def test_question_chips_ask_once_and_reset(app):
     assert chat[-2]["content"] == "Which findings have Missing coverage?" and "F-001" in chat[-1]["content"]
     app.run()
     assert len(app.session_state["chat"]) == 2  # a rerun doesn't ask again
+
+
+# ---------------------------------------------------------------- memory, two-person rule, library, writer
+
+def fresh_app(monkeypatch, **env):
+    monkeypatch.setenv("COPILOT_SIM_DELAY", "0")
+    monkeypatch.setenv("COPILOT_BACKEND", "simulated")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    assert not at.exception
+    return at
+
+
+def decide_everything(at, reject_one=True):
+    if reject_one:
+        reject = buttons(at, "reject:")[0]
+        at.text_input(key=reject.key.replace("reject:", "note:")).input("Covered by the HR handbook").run()
+        at.button(key=reject.key).click().run()
+    for _ in range(40):
+        pending = [b for b in buttons(at, "approve:") if not b.disabled]
+        if not pending:
+            break
+        pending[0].click().run()
+        assert not at.exception
+
+
+def test_two_people_decide_and_confirm_before_sign_off(monkeypatch):
+    at = fresh_app(monkeypatch, COPILOT_TWO_PERSON="on")
+    session = run_sample_analysis(at, reviewer="Mahsa")
+    decide_everything(at)
+    assert all(f.decided for f in session.findings)
+    assert at.button(key="finalize").disabled
+    assert not [b for b in at.button if b.key == "bulk_confirm"]  # nobody confirms their own decisions
+
+    at.text_input(key="reviewer_name").input("Shreeja").run()
+    assert any("waiting for your confirmation" in i.value for i in at.info)
+    at.button(key="bulk_confirm").click().run()
+    assert all(f.confirmed_by == "Shreeja" for f in session.findings)
+    at.button(key="finalize").click().run()
+    assert not at.exception and session.finalized
+    report = next(m.value for m in at.markdown if m.value.startswith("# Compliance gap report"))
+    assert "Two-person rule" in report and "Confirmed by:** Shreeja" in report
+
+
+def test_a_review_reopens_in_a_new_session_from_the_library(monkeypatch):
+    first = fresh_app(monkeypatch)
+    session = run_sample_analysis(first, reviewer="Mahsa")
+    buttons(first, "approve:")[0].click().run()
+    approved = next(f.finding_id for f in session.findings if f.status == "approved")
+
+    later = fresh_app(monkeypatch)  # another browser, or after a restart
+    assert later.session_state["nav"] == "Library"  # returning users land in the library
+    assert any(m.label == "Policies" and m.value == "1" for m in later.metric)
+    later.button(key=f"lib_open:{session.ledger_run_id}").click().run()
+    assert not later.exception and later.session_state["nav"] == "Review"
+    reopened = later.session_state["review_session"]
+    assert reopened.restored and reopened.get(approved).status == "approved"
+    assert reopened.get(approved).reviewer == "Mahsa"
+
+
+def test_a_page_changed_elsewhere_warns_and_refuses_stale_decisions(monkeypatch):
+    first = fresh_app(monkeypatch)
+    session = run_sample_analysis(first, reviewer="Mahsa")
+    second = fresh_app(monkeypatch)
+    second.text_input(key="reviewer_name").input("Anu").run()
+    second.button(key=f"lib_open:{session.ledger_run_id}").click().run()
+    buttons(second, "approve:")[0].click().run()
+
+    first.run()
+    assert any("changed this review" in w.value for w in first.warning)
+    buttons(first, "approve:")[0].click().run()
+    assert not first.exception
+    assert any("changed this review" in e.value for e in first.error)
+    assert all(f.status == "pending" for f in session.findings)  # the stale page changed nothing
+    first.button(key="reload_review").click().run()
+    assert first.session_state["review_session"].restored
+
+
+def test_the_library_compares_policies_and_verifies_the_trail(monkeypatch):
+    at = fresh_app(monkeypatch)
+    run_sample_analysis(at, reviewer="Mahsa")
+    at.segmented_control(key="nav").set_value("Analyze").run()
+    at.selectbox(key="loaded_policy").set_value("SAMPLE_Remote_Work_Policy_injection_demo.pdf").run()
+    at.button(key="run_analysis").click().run()
+    session = at.session_state["review_session"]
+    lock = next(f for f in session.findings if f.framework_control == "AC-11")
+    at.session_state["focus_id"] = lock.finding_id
+    at.run()
+    shown = " ".join([m.value for m in at.markdown] + [c.value for c in at.caption])
+    assert "Your other policies on" in shown and "15 minutes" in shown and "5 minutes here" in shown
+    at.segmented_control(key="nav").set_value("Library").run()
+    assert not at.exception
+    texts = " ".join(m.value for m in at.markdown)
+    assert "Values that differ between policies" in texts and "Not addressed by any policy yet" in texts
+    assert any("Trail intact" in s.value for s in at.success)
+
+
+def test_the_policy_writer_drafts_approves_and_checks_a_policy(monkeypatch):
+    at = fresh_app(monkeypatch)
+    at.segmented_control(key="nav").set_value("Writer").run()
+    at.text_input(key="writer_org").input("Maple Street Bakery").run()
+    at.button(key="writer_draft_btn").click().run()
+    assert not at.exception
+    draft = at.session_state["writer_draft"]
+    assert draft.title == "Maple Street Bakery Information Security Policy" and len(draft.sections) >= 9
+    assert at.button(key="writer_approve").disabled  # needs a named reviewer
+    at.text_input(key="reviewer_name").input("Mahsa").run()
+    at.button(key="writer_approve").click().run()
+    assert at.session_state["writer_draft"].approved_by == "Mahsa"
+
+    at.button(key="writer_check").click().run()
+    assert at.session_state["nav"] == "Analyze" and at.session_state["policy_origin"] == "Starter policy draft"
+    assert at.session_state["doc"].origin == "drafted"
+    at.button(key="run_analysis").click().run()
+    session = at.session_state["review_session"]
+    assert session.run.policy_origin == "drafted" and len(session.findings) > 30
+    assert session.document_record["version"] == 1  # the approved draft is in the library
+
+
+def test_everything_still_works_with_memory_off(monkeypatch):
+    at = fresh_app(monkeypatch, COPILOT_MEMORY="off")
+    session = run_sample_analysis(at)
+    assert session.ledger_run_id is None
+    buttons(at, "approve:")[0].click().run()
+    assert not at.exception
+    at.segmented_control(key="nav").set_value("Library").run()
+    assert any("library is off" in w.value for w in at.warning)

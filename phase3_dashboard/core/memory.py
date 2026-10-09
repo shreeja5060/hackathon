@@ -72,9 +72,15 @@ def enabled() -> bool:
     return os.getenv("COPILOT_MEMORY", "on").strip().lower() not in {"off", "0", "false", "no"}
 
 
+def _from_repo(value: str) -> Path:
+    """Relative paths in settings mean relative to the repo, wherever the app was started from."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
 def default_paths(simulated: bool) -> tuple[Path, Path]:
-    ledger = Path(os.getenv("LEDGER_PATH") or DEFAULT_LEDGER)
-    documents = Path(os.getenv("COPILOT_DOCUMENT_DIR") or ledger.parent / "documents")
+    ledger = _from_repo(os.getenv("LEDGER_PATH") or str(DEFAULT_LEDGER))
+    documents = _from_repo(os.getenv("COPILOT_DOCUMENT_DIR") or str(ledger.parent / "documents"))
     if simulated:
         ledger = ledger.with_name(f"{ledger.stem}-simulator{ledger.suffix or '.sqlite3'}")
         documents = documents.with_name(f"{documents.name}-simulator")

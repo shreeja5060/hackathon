@@ -119,6 +119,8 @@ def reset_work() -> None:
     ss.inline = {}
     ss.writer_draft = None
     ss.pop("_stale", None)
+    ss.pop("_statements", None)
+    ss.pop("loaded_policy", None)  # the other data source has other policies
     ss.queue_ver = ss.get("queue_ver", 0) + 1
 
 
@@ -1368,7 +1370,8 @@ def _library_overlaps(mem, rows) -> None:
         st.markdown("##### Values that differ between policies", anchors=False)
         for row in conflicts:
             for conflict in row["conflicts"][:3]:
-                first, second, (dimension, values_a, values_b) = conflict["a"], conflict["b"], conflict["values"]
+                first, second = conflict["a"], conflict["b"]
+                values_a, values_b = conflict["values"][1], conflict["values"][2]
                 with st.container(border=True):
                     with st.container(horizontal=True, vertical_alignment="center", gap="small"):
                         st.badge(row["control"], color="blue", icon=":material/menu_book:")

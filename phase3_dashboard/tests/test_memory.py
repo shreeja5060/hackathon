@@ -172,6 +172,8 @@ def test_simulator_records_are_kept_apart(monkeypatch, tmp_path):
     sim, sim_docs = memory.default_paths(simulated=True)
     assert live.name == "ledger.sqlite3" and sim.name == "ledger-simulator.sqlite3"
     assert live_docs.name == "documents" and sim_docs.name == "documents-simulator"
+    monkeypatch.setenv("LEDGER_PATH", "data/ledger.sqlite3")  # relative: to the repo, not the start folder
+    assert memory.default_paths(simulated=False)[0] == memory.REPO_ROOT / "data" / "ledger.sqlite3"
 
 
 def test_statements_leave_out_rejected_findings(sim_backend, mem):

@@ -178,3 +178,29 @@ def test_qa_agent_reads_the_review_and_its_suggestion_reaches_the_reviewer(live,
     assert analysis.finalize_review(live, session, "Mahsa") == []
     final = live._app.get_state(live._config(mfa.thread_id)).values["final_findings"]
     assert final[0]["recommendation"] == SUGGESTED and final[0]["recommendation_edited_by_human"] is True
+
+
+@needs_pipeline
+def test_live_policy_writer_uses_the_shared_client_and_nists_own_text(live, monkeypatch, tmp_path):
+    """Live mode drafts each section with the same model client as the agents, grounded in Phase 1's
+    copy of the NIST catalog, and keeps the paused-run check honest (is_paused)."""
+    from policy_writer.writer import draft_policy
+
+    from .test_policy_writer import BAKERY, fake_client, good_reply
+
+    client = fake_client(good_reply)
+    monkeypatch.setattr(sys.modules["claude_client"], "make_client", lambda: client)
+    processed = tmp_path / "data" / "processed"
+    processed.mkdir(parents=True)
+    (processed / "framework_chunks.json").write_text(json.dumps([
+        {"locator": "IR-6", "text": "IR-6 Incident Reporting: require personnel to report suspected incidents...",
+         "source": "NIST_SP-800-53_rev5_catalog.json"}]), encoding="utf-8")
+    live._root, live._framework_texts = tmp_path, None
+
+    draft = draft_policy(BAKERY, ["incidents"], drafter=live.policy_drafter())
+    assert draft.sections[0].method == "ai"
+    assert "require personnel to report suspected incidents" in client.calls[0]["messages"][0]["content"]
+
+    run = live.run_section(CHUNKS[0], "writer-check-s000")
+    assert live.is_paused("writer-check-s000") and not live.is_paused("no-such-run")
+    assert run["__interrupt__"]

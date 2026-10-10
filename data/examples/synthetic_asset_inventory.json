@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "environment": "hackathon-demo",
+  "captured_at": "2026-09-30T18:00:00Z",
+  "assets": [
+    {
+      "resource_id": "demo-user-alex",
+      "resource_type": "AWS IAM user",
+      "owner": "Demo platform team",
+      "purpose": "Infrastructure administration",
+      "privilege_level": "privileged",
+      "lifecycle_status": "active"
+    },
+    {
+      "resource_id": "demo-user-sam",
+      "resource_type": "AWS IAM user",
+      "owner": "Demo operations team",
+      "purpose": "Routine business access",
+      "privilege_level": "non_privileged",
+      "lifecycle_status": "active"
+    },
+    {
+      "resource_id": "demo-user-jordan",
+      "resource_type": "AWS IAM user",
+      "owner": null,
+      "purpose": "Temporary project access",
+      "privilege_level": "unknown",
+      "lifecycle_status": "active"
+    },
+    {
+      "resource_id": "demo-bucket-documents",
+      "resource_type": "AWS S3 bucket",
+      "owner": "Demo operations team",
+      "purpose": "Business document storage",
+      "privilege_level": null,
+      "lifecycle_status": "active"
+    },
+    {
+      "resource_id": "demo-sg-admin",
+      "resource_type": "AWS security group",
+      "owner": "Demo platform team",
+      "purpose": "Administrative network access",
+      "privilege_level": null,
+      "lifecycle_status": "active"
+    },
+    {
+      "resource_id": "demo-trail",
+      "resource_type": "AWS CloudTrail trail",
+      "owner": "Demo security team",
+      "purpose": "Audit event collection",
+      "privilege_level": null,
+      "lifecycle_status": "active"
+    }
+  ]
+}

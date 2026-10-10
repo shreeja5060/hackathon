@@ -161,7 +161,14 @@ def prepare_chunk(record, tokenizer):
 def main():
     policies = read_json(PROCESSED / "policy_chunks.json")
     frameworks = read_json(PROCESSED / "framework_chunks.json")
-    original_chunks = policies + frameworks
+    environment_path = PROCESSED / "environment_bundle.json"
+    environment = read_json(environment_path) if environment_path.exists() else {"chunks": [], "sources": {}}
+    inventory_path = PROCESSED / "inventory_bundle.json"
+    inventory = read_json(inventory_path) if inventory_path.exists() else {"chunks": [], "sources": {}}
+    logs_path = PROCESSED / "logs_bundle.json"
+    logs = read_json(logs_path) if logs_path.exists() else {"chunks": [], "sources": {}}
+    evidence = environment["chunks"] + inventory["chunks"] + logs["chunks"]
+    original_chunks = policies + frameworks + evidence
 
     sources = read_json(PROCESSED / "policy_sources.json")
     framework_sources = read_json(
@@ -172,6 +179,19 @@ def main():
         raise ValueError("Duplicate filenames in the source records.")
 
     sources.update(framework_sources)
+    if sources.keys() & environment["sources"].keys():
+        raise ValueError("Duplicate environment source filename")
+    sources.update(environment["sources"])
+    if sources.keys() & inventory["sources"].keys():
+        raise ValueError("Duplicate inventory source filename")
+    for inventory_source in inventory["sources"].values():
+        linked_source = environment["sources"].get(inventory_source["linked_configuration"])
+        if linked_source is None or linked_source.get("sha256") != inventory_source["linked_configuration_sha256"]:
+            raise ValueError("Inventory/configuration snapshots differ. Rerun load_environment and load_inventory.")
+    sources.update(inventory["sources"])
+    if sources.keys() & logs["sources"].keys():
+        raise ValueError("Duplicate security-log source filename")
+    sources.update(logs["sources"])
 
     if not original_chunks:
         raise ValueError("No chunks found.")
@@ -196,7 +216,7 @@ def main():
 
     print(
         f"Loaded {len(policies)} policy chunks and "
-        f"{len(frameworks)} framework chunks."
+        f"{len(frameworks)} framework chunks and {len(evidence)} evidence chunks."
     )
     print("Loading embedding model; the first run downloads its files...")
 
@@ -301,12 +321,17 @@ def main():
 
     save_json(PROCESSED / "indexed_chunks.json", indexed_chunks)
 
+    # Keep the exact originals with this index, even if inputs later change.
+    originals_file = collection_name + "-originals.json"
+    save_json(DB_PATH / originals_file, original_chunks)
+
     # Publish the active index only after all chunks are stored.
     save_json(
         DB_PATH / "index_manifest.json",
         {
             **settings,
             "collection_name": collection_name,
+            "originals_file": originals_file,
             "embedding_dimension": int(embeddings.shape[1]),
             "input_chunk_count": len(original_chunks),
             "indexed_chunk_count": stored_count,

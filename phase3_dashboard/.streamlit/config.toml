@@ -1,0 +1,113 @@
+# Streamlit settings for the dashboard. Streamlit reads this file when you
+# start the app from the phase3_dashboard folder:  streamlit run app.py
+
+[server]
+# Upload limit in MB. The app also checks file type, size and page count itself.
+maxUploadSize = 10
+enableXsrfProtection = true
+# Serves static/ (the self-hosted fonts) at app/static/.
+enableStaticServing = true
+
+[client]
+# The browser shows only the error type; the full traceback prints in the
+# terminal (PyCharm's Run window). Use "full" while debugging if you prefer.
+showErrorDetails = "type"
+# Hide Streamlit's developer menu (Deploy, Rerun...) from reviewers and judges.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+# ---------------------------------------------------------------- theme
+# An audit console: a deep navy rail for navigation and settings, a calm
+# light workspace for evidence, and color reserved for coverage
+# (green Full, amber Partial, red Missing, slate Not observable).
+# Every text color below clears WCAG AA (4.5:1) on its background.
+
+[theme]
+base = "light"
+font = "Public Sans, sans-serif"
+headingFont = "Public Sans, sans-serif"
+codeFont = "IBM Plex Mono, monospace"
+baseFontSize = 15
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+headingFontSizes = ["2rem", "1.5rem", "1.2rem", "1.05rem", "1rem", "0.9rem"]
+
+primaryColor = "#1F5FAE"
+backgroundColor = "#F6F8FA"
+secondaryBackgroundColor = "#E9EEF4"
+textColor = "#16233A"
+linkColor = "#1F5FAE"
+borderColor = "#D3DBE5"
+showWidgetBorder = true
+baseRadius = "0.375rem"
+buttonRadius = "0.375rem"
+codeBackgroundColor = "#E9EEF4"
+codeTextColor = "#16233A"
+dataframeHeaderBackgroundColor = "#EDF1F6"
+dataframeBorderColor = "#D3DBE5"
+
+greenColor = "#1A7F5A"
+greenBackgroundColor = "#E3F2EC"
+greenTextColor = "#135E43"
+orangeColor = "#D08A1E"
+orangeBackgroundColor = "#FBEFD9"
+orangeTextColor = "#8A5306"
+redColor = "#B42318"
+redBackgroundColor = "#FBE7E5"
+redTextColor = "#8F1C13"
+grayColor = "#8A97A8"
+grayBackgroundColor = "#EDF0F4"
+grayTextColor = "#4A5668"
+blueColor = "#1F5FAE"
+blueBackgroundColor = "#E4EDF8"
+blueTextColor = "#184C8C"
+violetColor = "#6E56CF"
+violetBackgroundColor = "#EEEAFB"
+violetTextColor = "#4F3BA6"
+
+[theme.sidebar]
+backgroundColor = "#0E1B2C"
+secondaryBackgroundColor = "#182A40"
+textColor = "#D5DEEA"
+primaryColor = "#8DB8F2"
+linkColor = "#8DB8F2"
+borderColor = "#263A54"
+codeBackgroundColor = "#182A40"
+codeTextColor = "#D5DEEA"
+
+[[theme.fontFaces]]
+family = "Public Sans"
+url = "app/static/fonts/public-sans-latin-400-normal.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Public Sans"
+url = "app/static/fonts/public-sans-latin-500-normal.woff2"
+weight = 500
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Public Sans"
+url = "app/static/fonts/public-sans-latin-600-normal.woff2"
+weight = 600
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Public Sans"
+url = "app/static/fonts/public-sans-latin-700-normal.woff2"
+weight = 700
+style = "normal"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/ibm-plex-mono-latin-400-normal.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/ibm-plex-mono-latin-500-normal.woff2"
+weight = 500
+style = "normal"

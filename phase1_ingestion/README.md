@@ -1,4 +1,4 @@
-# Phase 1 — Policy and NIST retrieval
+# Phase 1 — Policy, framework and evidence retrieval
 
 **Owner:** Maryam Arief. This module prepares the evidence used by Shreeja's
 agents and Anu's Q&A agent.
@@ -8,11 +8,13 @@ agents and Anu's Q&A agent.
 - Three public-release policy PDFs in `data/policies/`.
 - NIST SP 800-53 Revision 5, Release 5.2.0, in OSCAL JSON.
 - NIST Cybersecurity Framework (CSF) 2.0, in OSCAL JSON.
+- Synthetic system configurations and linked asset inventory.
+- Supplied CloudTrail security-log records; see [LOGS.md](LOGS.md).
 
-Both catalogs are included. Configurations, logs, and asset inventory are
-stretch goals; their ingestion is not implemented in this MVP. The current
-scripts assign document kinds from the known inputs; AI classification at
-upload time is not part of this module.
+Configuration and inventory loaders use the normalized synthetic demo schemas.
+The log loader accepts CloudTrail Records JSON. Scripts assign document kinds
+from their selected input formats; AI classification at upload time is not part
+of this module.
 
 The framework downloader pins its files to NIST OSCAL Content commit
 [`78650f02ad9321bb7b817846f8fbd4f2bcd620de`](https://github.com/usnistgov/oscal-content/tree/78650f02ad9321bb7b817846f8fbd4f2bcd620de)
@@ -151,8 +153,9 @@ if framework_hits:
 
 `search(query, type=None, top_k=5)` returns up to `top_k` results in descending
 similarity order. `type=None` searches all indexed roles. The roles are
-`internal`, `framework`, and `evidence`; the current index has no `evidence`
-records, so that filter returns an empty list. Invalid roles, empty queries,
+`internal`, `framework`, and `evidence`. Evidence results depend on which optional
+configuration, inventory and log bundles were included when indexing.
+Invalid roles, empty queries,
 invalid result counts, and queries exceeding the model's input limit raise
 errors instead of silently changing the request.
 
@@ -165,7 +168,7 @@ Every search result has exactly these eight fields:
 | `source` | Original filename, linking to its source record |
 | `page` | One-based PDF page number, or `None` |
 | `type` | `internal`, `framework`, or `evidence` |
-| `doc_kind` | Descriptive string; currently `policy`, `control_catalog`, or `cybersecurity_framework` |
+| `doc_kind` | `policy`, `control_catalog`, `cybersecurity_framework`, `system_configuration`, `asset_inventory`, or `security_log` |
 | `locator` | Section heading, fallback page label, control identifier, or `None` |
 | `score` | Cosine similarity to this query, from -1 to 1; higher is closer |
 
@@ -178,8 +181,9 @@ to 400 characters; the function returns full passage text.
 ## Original entries and source provenance
 
 A split fragment has an internal `parent_chunk_id` pointing to its complete
-entry in `policy_chunks.json` or `framework_chunks.json`. Unsplit entries keep
-their original IDs and need no parent field.
+entry. New indexes save all originals alongside their collection; older indexes
+use `policy_chunks.json` and `framework_chunks.json`. Unsplit entries keep their
+original IDs and need no parent field.
 
 `get_original_chunk(indexed_chunk_id)` looks up that exact indexed record and
 resolves its parent, if present. It returns the original seven-field chunk
@@ -238,3 +242,53 @@ findings. Top-k results can contain weak matches, and absence from search
 results is not proof that a policy lacks a requirement. The policy PDFs are
 sanitized public templates; preserve their publication context when assessing
 missing detail or outdated content.
+
+## Optional synthetic environment evidence
+
+Branch `phase1-environment` adds six synthetic resource records: three IAM users
+(MFA true, false and unknown), one S3 bucket, one security group and one CloudTrail
+trail. `data/examples/synthetic_environment.json` is our normalized demo format,
+**not an AWS API export or evidence from a real account**. No cloud credentials
+or new packages are needed. The parser currently accepts synthetic inputs only.
+
+After the existing policy/framework preparation, run:
+
+```bash
+python -m phase1_ingestion.load_environment
+python -m phase1_ingestion.check_environment
+python phase1_ingestion/chunk_and_embed.py
+python -m phase1_ingestion.check_retriever
+python -m phase1_ingestion.check_environment --index
+```
+
+The indexer includes `data/processed/environment_bundle.json` when present.
+Without it, policy/framework indexing still works. To exclude demo evidence,
+remove that generated bundle and rebuild the index.
+
+Evidence uses the same search contract: `type="evidence"`,
+`doc_kind="system_configuration"`, `page=None`, and a JSON Pointer locator such
+as `/resources/0`. Synthetic status, snapshot time and resource identity are
+included in the passage text so they survive the eight-field response.
+
+```python
+from phase1_ingestion.retriever import search, get_original_chunk
+hits = search("Is MFA enabled for demo-user-alex?", type="evidence", top_k=3)
+original = get_original_chunk(hits[0]["chunk_id"])
+```
+
+New indexes save their originals alongside the collection and reference them in
+its manifest. Exact lookup therefore uses the inputs for that index, rather than
+potentially edited input files. Older manifests still support the original
+policy/framework lookup behavior.
+
+Evidence is available through `search(type="evidence")`. Indexing prepares
+retrievable passages without generating an audit finding. A missing setting
+remains unknown. Bucket-level public access
+settings alone do not establish effective access; a security-group rule alone
+does not prove reachability; a trail setting alone does not establish all-account
+logging coverage. The demo supports investigation of these settings without
+generating a compliance verdict. Linked inventory is described in
+[INVENTORY.md](INVENTORY.md), and security-log ingestion in [LOGS.md](LOGS.md).
+
+Validation: offline parser checks run in the development environment. The real
+embedding/index checks must also run with the existing local model and data.

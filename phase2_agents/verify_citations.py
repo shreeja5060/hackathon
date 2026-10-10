@@ -33,9 +33,31 @@ except Exception:
     RETRIEVER_BACKEND = "placeholder (shared/fake_search.py)"
 
 
+def _framework_control_ids():
+    """
+    Every framework control ID in the index, read straight from the index
+    metadata (exact match). Returns None when the backend cannot enumerate
+    the index (the placeholder fallback), in which case verify() falls back
+    to a small search.
+
+    Why not just search for the ID? search() ranks by meaning, not by exact
+    text, so a real control like IA-2 can rank 6th for its own name and look
+    "missing". An exact metadata lookup has no such false alarms.
+    """
+    try:
+        import retriever
+        idx = retriever._index()
+        col = idx if hasattr(idx, "query") else next(x for x in idx if hasattr(x, "query"))
+        metas = col.get(include=["metadatas"])["metadatas"]
+        return {m.get("locator") for m in metas if m.get("type") == "framework"}
+    except Exception:
+        return None
+
+
 def verify(report_path: str) -> dict:
     with open(report_path) as f:
         findings = json.load(f)
+    known_controls = _framework_control_ids()
 
     results = {
         "backend": RETRIEVER_BACKEND,
@@ -76,8 +98,12 @@ def verify(report_path: str) -> dict:
         control = f.get("framework_control")
         if control:
             results["controls_cited"] += 1
-            hits = search(control, type="framework", top_k=5)
-            if any(h.get("locator") == control for h in hits):
+            if known_controls is not None:
+                found = control in known_controls
+            else:  # placeholder backend: small search is enough
+                found = any(h.get("locator") == control
+                            for h in search(control, type="framework", top_k=5))
+            if found:
                 results["control_resolves"] += 1
             else:
                 results["problems"].append({"index": i, "requirement": f.get("requirement"),
@@ -99,7 +125,7 @@ def main():
     print(f"Source document matches:     {r['source_matches']}/{n}")
     print(f"Section/locator matches:     {r['locator_matches']}/{n}")
     print(f"Framework control resolves:  {r['control_resolves']}/{r['controls_cited']} "
-          f"(of findings that cite a control)")
+          f"(of findings that cite a control; exact match against the index)")
 
     if r["problems"]:
         print(f"\n{len(r['problems'])} problem(s):")

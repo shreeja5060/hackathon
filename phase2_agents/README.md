@@ -112,3 +112,20 @@ agreement, and citation validity against them. See `eval/README.md`.
 prove the round trip. `shared/llama_retriever.py` is a LlamaIndex-based
 alternative retrieval layer, configured to use Claude (not OpenAI). Neither is
 on the critical path for the demo.
+
+## Claude access (`CLAUDE_BACKEND`)
+
+The agents get their Claude client from `shared/claude_client.py`; each agent
+creates its own client with `make_client()`. The backend is chosen in `.env`:
+
+- `CLAUDE_BACKEND=anthropic` (default): calls api.anthropic.com with
+  `ANTHROPIC_API_KEY`.
+- `CLAUDE_BACKEND=vertex`: Claude through Vertex AI in the GCP project, billed to
+  the project, with no Anthropic key. This is the intended route, but as of
+  Oct 7 the project's quota for Claude on Vertex is 0, so every call returns a
+  429 until the organizers raise it. In Cloud Shell the Google credentials are
+  automatic; elsewhere run `gcloud auth application-default login` once. The
+  region is `global`.
+
+`python shared/claude_client.py` makes one tiny call to check whichever backend
+is set.

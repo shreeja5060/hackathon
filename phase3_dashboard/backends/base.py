@@ -65,6 +65,20 @@ class ComplianceBackend(ABC):
         state = self._app.invoke(self._command(resume=decisions), config=self._config(thread_id))
         return {"findings": state.get("final_findings", []), "errors": state.get("errors", [])}
 
+    def is_paused(self, thread_id: str) -> bool:
+        """Is this run still paused at human review in this process? (False after a restart.)"""
+        try:
+            state = self._app.get_state(self._config(thread_id))
+        except Exception:  # noqa: BLE001 - no state means nothing to resume
+            return False
+        return bool(state and any(getattr(task, "interrupts", None) for task in state.tasks or ()))
+
+    model_description: str | None = None  # which model wrote the findings, for the permanent record
+
+    def policy_drafter(self):
+        """A function that adapts starter-policy sections with AI, or None to use the baseline clauses."""
+        return None
+
     @abstractmethod
     def list_policies(self) -> list[str]:
         """Names of policies that are already loaded (samples or Phase 1's index)."""

@@ -91,6 +91,7 @@ class LiveBackend(ComplianceBackend):
         self._pipeline = module
         self.retrieval_backend = getattr(module, "RETRIEVER_BACKEND", None)
         self._indexed: dict[str, list[dict]] | None = None
+        self._framework_texts: dict[str, str] | None = None
 
     @property
     def placeholder_retrieval(self) -> bool:
@@ -115,6 +116,44 @@ class LiveBackend(ComplianceBackend):
 
     def submit_review(self, thread_id: str, decisions: dict) -> dict:
         return self._pipeline.submit_decisions(thread_id, decisions)
+
+    def is_paused(self, thread_id: str) -> bool:
+        try:
+            return self._pipeline.get_pending(thread_id) is not None
+        except Exception:  # noqa: BLE001 - an unknown thread means nothing to resume
+            return False
+
+    @property
+    def model_description(self) -> str | None:
+        client = sys.modules.get("claude_client")  # the agents import it; never import it here just to ask
+        return getattr(client, "DESCRIPTION", None)
+
+    # ------------------------------------------------------------ starter policy writer
+
+    def framework_text(self, control_id: str) -> str | None:
+        """NIST's text for one control, from Phase 1's processed framework chunks (exact ID match)."""
+        if self._framework_texts is None:
+            path = self._root / "data" / "processed" / "framework_chunks.json"
+            texts: dict[str, str] = {}
+            if path.is_file():
+                try:
+                    for record in json.loads(path.read_text(encoding="utf-8")):
+                        if record.get("locator") and SP80053_FILE in (record.get("source") or ""):
+                            texts.setdefault(record["locator"], record.get("text") or "")
+                except (OSError, ValueError):
+                    texts = {}
+            self._framework_texts = texts
+        return self._framework_texts.get(control_id)
+
+    def policy_drafter(self):
+        """Claude (or whichever model CLAUDE_BACKEND selects) adapts each section, grounded in NIST's text."""
+        from policy_writer.writer import claude_drafter
+
+        client_module = sys.modules.get("claude_client")
+        if client_module is None:
+            sys.path.append(str(self._root / "shared"))
+            import claude_client as client_module  # noqa: PLC0415 - only when a draft is requested
+        return claude_drafter(client_module.make_client(), client_module.MODEL, self.framework_text)
 
     # ------------------------------------------------------------ policies
 
@@ -189,8 +228,7 @@ class LiveBackend(ComplianceBackend):
                     publication_date=record.get("publication_date"),
                     source=record.get("source_url"),
                     sha256=record.get("sha256"),
-                    note="The index also holds NIST CSF 2.0, so the Mapper can return CSF outcomes "
-                         "until Phase 2 filters by framework.",
+                    note=None,
                 )
                 return info
         return info

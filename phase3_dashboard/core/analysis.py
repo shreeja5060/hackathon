@@ -122,7 +122,9 @@ def finalize_review(backend: "ComplianceBackend", session: ReviewSession, review
     """Send each paused run its decisions, then lock the review.
 
     Returns a list of errors. The review is only finalized when it's empty;
-    runs that resumed successfully aren't resumed again on a retry.
+    runs that resumed successfully aren't resumed again on a retry. A review
+    reopened from the ledger skips runs that are no longer paused (the server
+    restarted since): the ledger already holds its decisions.
     """
     ok, reason = can_finalize(session, reviewer)
     if not ok:
@@ -130,7 +132,12 @@ def finalize_review(backend: "ComplianceBackend", session: ReviewSession, review
 
     errors = []
     for thread_id, decisions in decisions_by_thread(session).items():
-        if thread_id in session.resumed_threads:
+        if thread_id in session.resumed_threads or thread_id in session.closed_threads:
+            continue
+        if session.restored and not backend.is_paused(thread_id):
+            # Reopened from the ledger after the paused run ended (a restart, or another session
+            # already resumed it). Its decisions are in the ledger; there is nothing left to resume.
+            session.closed_threads.add(thread_id)
             continue
         try:
             _confirm(backend.submit_review(thread_id, decisions), decisions)

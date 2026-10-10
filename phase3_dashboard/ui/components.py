@@ -66,6 +66,13 @@ def format_ts(iso: str | None) -> str:
         return iso
 
 
+def short_policy_name(name: str | None) -> str:
+    """'SAMPLE_Computer_Security_Policy.pdf' -> 'Computer Security Policy', for tables and captions."""
+    stem = re.sub(r"\.(pdf|md)$", "", str(name or ""), flags=re.I)
+    stem = stem.removeprefix("SAMPLE_").replace("_injection_demo", "").removesuffix("_draft")
+    return " ".join(stem.replace("_", " ").split()) or "Untitled policy"
+
+
 def report_file_stem(policy_source: str, finalized_at: str | None) -> str:
     stem = re.sub(r"\.pdf$", "", policy_source, flags=re.I)
     stem = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-").lower()[:60] or "policy"
@@ -171,6 +178,12 @@ QUEUE_CONFIG = {
     "Status": st.column_config.TextColumn(width=82),
     "Requirement": st.column_config.TextColumn(width=210),
 }
+QUEUE_CONFIG_TWO_PERSON = {
+    **QUEUE_CONFIG,
+    "Status": st.column_config.TextColumn(width=104, help="Two-person rule: 1/2 means decided and waiting for a "
+                                                          "second reviewer; 2/2 means a different person confirmed it."),
+    "Requirement": st.column_config.TextColumn(width=188),
+}
 QUEUE_STATUS = {"pending": "Open", "approved": "Approved", "rejected": "Rejected"}
 
 
@@ -179,13 +192,20 @@ def coverage_cell_css(value) -> str:
     return f"color:{style['ink']};background-color:{style['tint']};font-weight:600"
 
 
-def queue_frame(findings: list[Finding], focus_id: str | None):
+def queue_status(finding: Finding, two_person: bool) -> str:
+    label = QUEUE_STATUS[finding.status]
+    if two_person and finding.decided:
+        label += " 2/2" if finding.confirmed else " 1/2"
+    return label
+
+
+def queue_frame(findings: list[Finding], focus_id: str | None, two_person: bool = False):
     """The review queue: one row per finding, colored by coverage and status, the open one tinted."""
     frame = pd.DataFrame(
         [{
             "ID": f.finding_id,
             "Coverage": f.coverage,
-            "Status": QUEUE_STATUS[f.status],
+            "Status": queue_status(f, two_person),
             "Requirement": f.requirement,
         } for f in findings],
         columns=QUEUE_COLUMNS,
@@ -195,7 +215,9 @@ def queue_frame(findings: list[Finding], focus_id: str | None):
     coverage_css = coverage_cell_css
 
     def status_css(value):
-        style = labels.get(value)
+        if value.endswith(" 1/2"):
+            return "color:#8A5306;font-weight:500"  # decided, waiting for the second reviewer
+        style = labels.get(value.removesuffix(" 2/2"))
         return f"color:{style['ink']};font-weight:500" if style else ""
 
     def focus_row(row):
@@ -221,6 +243,16 @@ def render_finding_badges(finding: Finding) -> None:
     st.badge(status["label"], color=status["badge"], icon=status["icon"])
     if finding.assistant_suggestion and finding.status == "pending":
         st.badge("Suggestion waiting", color="violet", icon=":material/auto_awesome:")
+
+
+def render_second_review_badge(finding: Finding, two_person: bool) -> None:
+    if not two_person or not finding.decided:
+        return
+    if finding.confirmed:
+        st.badge("Confirmed", color="green", icon=":material/verified_user:",
+                 help=f"Confirmed by {escape_md(finding.confirmed_by)}")
+    else:
+        st.badge("Needs a second reviewer", color="orange", icon=":material/group:")
 
 
 def render_finding_body(session: review.ReviewSession, finding: Finding) -> None:
@@ -266,6 +298,55 @@ def decision_line(finding: Finding) -> str:
     if finding.reviewer_note:
         line += f" Note: {escape_md(finding.reviewer_note)}"
     return line
+
+
+def confirmation_line(finding: Finding) -> str:
+    line = f"Confirmed by {escape_md(finding.confirmed_by)} on {format_ts(finding.confirmed_at)}."
+    if finding.confirmation_note:
+        line += f" Note: {escape_md(finding.confirmation_note)}"
+    return line
+
+
+# ---------------------------------------------------------------- other policies (overlaps)
+
+RELATION_STYLE = {
+    "conflict": {"badge": "red", "icon": ":material/difference:", "label": "Values differ"},
+    "covered_elsewhere": {"badge": "green", "icon": ":material/task_alt:", "label": "Covered elsewhere"},
+    "overlap": {"badge": "gray", "icon": ":material/join_inner:", "label": "Also addressed"},
+}
+RELATION_HELP = {
+    "conflict": "Both policies set a value for this and the values differ. Decide which applies, then align "
+                "the policies. Many organizations apply the stricter rule unless the other policy is more specific.",
+    "covered_elsewhere": "This finding is a gap here, but another policy covers the control fully. Check that the "
+                         "other policy's scope includes the people and systems this one covers.",
+    "overlap": "Both policies address this control. Not a problem, but keep them consistent when either changes.",
+}
+
+
+def render_related(items: list[dict], control: str | None, limit: int = 3) -> None:
+    """What the organization's other policies (and other sections of this one) say about the same control."""
+    if not items:
+        return
+    explained: set[str] = set()
+    with st.container(border=True):
+        st.markdown(f":material/compare_arrows: **Your other policies on {control_md(control)}**")
+        for item in items[:limit]:
+            style = RELATION_STYLE[item["kind"]]
+            where = "This policy" if item.get("same_policy") else short_policy_name(item.get("policy"))
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+                st.badge(style["label"], color=style["badge"], icon=style["icon"], help=RELATION_HELP[item["kind"]])
+                st.markdown(f"**{escape_md(where)}**" + (f", {escape_md(item['locator'])}" if item.get("locator") else "")
+                            + f" · rated {escape_md(item.get('coverage') or 'unknown')} there", width="content")
+            if item.get("requirement_text"):
+                st.markdown("> " + escape_md(item["requirement_text"]))
+            if item["kind"] == "conflict":
+                st.caption(f":material/difference: {escape_md(item['detail'])}. " + RELATION_HELP["conflict"])
+                explained.add("conflict")
+            elif item["kind"] == "covered_elsewhere" and "covered_elsewhere" not in explained:
+                st.caption(RELATION_HELP["covered_elsewhere"])
+                explained.add("covered_elsewhere")
+        if len(items) > limit:
+            st.caption(f"{len(items) - limit} more in Library, Across policies.")
 
 
 # ---------------------------------------------------------------- assistant

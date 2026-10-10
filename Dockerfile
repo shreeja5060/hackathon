@@ -11,8 +11,12 @@
 #   docker run -p 8080:8080 -e ANTHROPIC_API_KEY=... compliance-copilot
 #
 # Cloud Run: give the service 4 GiB memory, pass ANTHROPIC_API_KEY from
-# Secret Manager, and for the demo use min and max instances 1 + session
-# affinity (review decisions live in the running instance's memory).
+# Secret Manager, and use min and max instances 1 + session affinity.
+# Reviews are kept in the ledger (data/ledger*.sqlite3). On Cloud Run the
+# container's disk is lost when an instance stops, so set
+# LEDGER_REPLICA_URL=gs://BUCKET/ledger: deploy/start.sh then restores the
+# ledger at start-up and Litestream streams every change to Cloud Storage.
+# Step-by-step commands (bucket, permissions, sign-in): deploy/README.md.
 # Vertex AI later (project quota is 0 for now): set CLAUDE_BACKEND=vertex,
 # ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION=global on the service, give
 # its service account the Vertex AI User role, and unset CHAT_MODEL.
@@ -32,6 +36,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CHAT_MODEL=claude-sonnet-5-5
 
 WORKDIR /app
+
+# Litestream (keeps the ledger safe on Cloud Run, see deploy/litestream.yml):
+# a pinned release, checked against the SHA-256 the project publishes.
+ARG LITESTREAM_VERSION=0.5.17
+ARG LITESTREAM_SHA256=cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d
+ADD https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-x86_64.tar.gz /tmp/litestream.tar.gz
+RUN echo "${LITESTREAM_SHA256}  /tmp/litestream.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin litestream \
+ && rm /tmp/litestream.tar.gz
 
 # CPU-only PyTorch first, at the version constraints-phase1.txt pins: the
 # default Linux wheel bundles CUDA (several GB) that Cloud Run can't use.
@@ -62,16 +75,14 @@ RUN python phase1_ingestion/parse_pdfs.py \
  && python phase1_ingestion/chunk_and_embed.py \
  && python -m phase1_ingestion.check_retriever
 
-# Run as a non-root user that can still write saved reports and the chat log.
-RUN useradd --create-home app && chown -R app:app /app
+# Run as a non-root user that can still write the ledger, saved documents and the chat log.
+RUN chmod +x /app/deploy/start.sh \
+ && useradd --create-home --uid 1000 app && chown -R app:app /app
 USER app
 
 EXPOSE 8080
-# Start from the dashboard folder so its .streamlit/config.toml (theme, fonts,
-# 10 MB upload limit, hidden error details) and static/ fonts are used.
+# deploy/start.sh starts the dashboard from its folder (so .streamlit/config.toml:
+# theme, fonts, 10 MB upload limit, hidden error details, are used), restoring and
+# replicating the ledger first when LEDGER_REPLICA_URL is set.
 WORKDIR /app/phase3_dashboard
-CMD streamlit run app.py \
-    --server.port=${PORT} \
-    --server.address=0.0.0.0 \
-    --server.headless=true \
-    --browser.gatherUsageStats=false
+CMD ["/app/deploy/start.sh"]

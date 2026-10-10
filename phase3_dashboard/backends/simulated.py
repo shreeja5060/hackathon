@@ -145,7 +145,7 @@ def chunk_pages_like_phase1(pages: list[dict]) -> tuple[list[dict], list[str]]:
                 "doc_kind": "policy", "page": record["page"], "locator": None,
             })
     note = ("No numbered section headings were found, so each page became one section. "
-            "Phase 1's chunker rejects files like this, so this upload will fail in live mode.")
+            "Findings from it are cited by page.")
     return fallback, [note]
 
 
@@ -219,7 +219,7 @@ _SPECIFIC = re.compile(
     r"\b(?:\d+|annual(?:ly)?|quarterly|monthly|weekly|daily|immediately|at least|within|no later than)\b", re.I
 )
 _TOPICS = tuple((re.compile(pattern, re.I), name, control) for pattern, name, control in data.TOPIC_RULES)
-MAX_REQUIREMENTS_PER_CHUNK = 4
+MAX_REQUIREMENTS_PER_CHUNK = 8
 
 
 def match_topic(text: str):
@@ -484,8 +484,50 @@ def _stronger_recommendation(finding: dict) -> str | None:
             "and review it at least once a year.")
 
 
+_WANTS_OTHERS = re.compile(r"\b(?:another|other|elsewhere|overlap\w*|conflict\w*|contradict\w*|differ\w*)\b",
+                          re.I)
+_RELATION_WORDS = {"conflict": "sets a different value", "covered_elsewhere": "covers it fully",
+                   "overlap": "also addresses it"}
+
+
+def _answer_about_other_policies(targets: list[dict]) -> dict | None:
+    """What the organization's other stored policies say about these findings' controls."""
+    lines, citations = [], []
+    for finding in targets:
+        related = finding.get("related_policies") or []
+        if not related:
+            continue
+        parts = []
+        for item in related[:2]:
+            citations.append({
+                "chunk_id": f"related:{item.get('run_id')}:{item.get('finding_id')}",
+                "text": item.get("requirement_text") or item.get("requirement") or "",
+                "source": item.get("policy") or "Another policy", "page": None, "type": "internal",
+                "doc_kind": "policy", "locator": item.get("locator"), "score": 1.0,
+            })
+            where = "another section of this policy" if item.get("same_policy") else item.get("policy")
+            detail = f" ({item['detail']})" if item.get("kind") == "conflict" else ""
+            parts.append(f"{where}, {item.get('locator') or 'unknown section'}, "
+                         f"{_RELATION_WORDS.get(item.get('kind'), 'also addresses it')}{detail} [{len(citations)}]")
+        lines.append(f"For {_finding_label(finding)} on {finding.get('framework_control')}: " + "; ".join(parts) + ".")
+        if len(lines) == 4:
+            break
+    if not lines:
+        return None
+    return {"answer": "Simulated answer (rules, not Claude). " + " ".join(lines)
+                      + " Decide which rule applies where values differ, and keep overlapping rules consistent.",
+            "citations": [c for c in citations if c["text"]], "suggestions": []}
+
+
 def _answer_about_review(corpus, question, findings) -> dict | None:
     targets = _targets(question, findings)
+    if _WANTS_OTHERS.search(question):
+        pool = targets or sorted((f for f in findings if f.get("related_policies")),
+                                 key=lambda f: 0 if any(r.get("kind") == "conflict" for r in f["related_policies"])
+                                 else 1)
+        about_others = _answer_about_other_policies(pool)
+        if about_others is not None:
+            return about_others
     if not targets:
         return None
     if _WANTS_SUGGESTION.search(question):
@@ -504,8 +546,12 @@ def _answer_about_review(corpus, question, findings) -> dict | None:
             "suggestions": [{"finding_id": f["finding_id"], "recommendation": text} for f, text in proposals],
         }
     listed = "; ".join(f"{_finding_label(f)}: {f.get('coverage')}, {f.get('status')}" for f in targets[:12])
+    # Show the NIST controls these findings were checked against, so the answer has sources.
+    controls = list(dict.fromkeys(f["framework_control"] for f in targets[:12]
+                                  if f.get("framework_control") in data.CONTROLS))
+    citations = [{**make_framework_chunk(cid, data.CONTROLS[cid]), "score": 1.0} for cid in controls]
     return {"answer": f"Simulated answer (rules, not Claude). {len(targets)} finding(s) match: {listed}.",
-            "citations": [], "suggestions": []}
+            "citations": citations, "suggestions": []}
 
 
 def simulated_answer(corpus: list[dict], question: str, findings: list[dict] | None = None) -> dict:
@@ -570,9 +616,14 @@ class SimulatedBackend(ComplianceBackend):
 
     retrieval_backend = "simulator (keyword rules)"
     placeholder_retrieval = False
+    model_description = "keyword rules (simulator, no AI)"
 
     def set_failing_section(self, index: int | None) -> None:
         self.pipeline.fail_section_index = index
+
+    def is_paused(self, thread_id: str) -> bool:
+        with self.pipeline._lock:
+            return thread_id in self.pipeline._threads
 
     def run_section(self, chunk: dict, thread_id: str) -> dict:
         return {**super().run_section(chunk, thread_id), "retrieval_backend": self.retrieval_backend}

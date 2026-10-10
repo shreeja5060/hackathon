@@ -74,7 +74,9 @@ for configuration, inventory and log evidence.
 
 You may be given the findings in the reviewer's current gap-analysis review, with their IDs \
 and review status. Refer to findings by ID. Use get_finding_evidence to read a finding's \
-policy text and NIST control before judging or rewriting it.
+policy text and NIST control before judging or rewriting it. It also returns what the \
+organization's other reviewed policies say about the same control; when they differ, cover \
+the gap, or repeat it, say so and cite them.
 
 When the reviewer asks you to improve, rewrite or suggest a recommendation, call \
 propose_recommendation once per finding with one or two concrete, actionable sentences \
@@ -162,6 +164,14 @@ def _get_client():
     return _client
 
 
+MAX_RELATED_POLICIES = 4
+RELATED_LABELS = {
+    "conflict": "Sets a different value for the same thing",
+    "covered_elsewhere": "Covers this control fully",
+    "overlap": "Also addresses this control",
+}
+
+
 class _Sources:
     """Numbers every passage shown to Claude in one answer as S1, S2, ..."""
 
@@ -215,6 +225,7 @@ def _normalize_findings(findings) -> dict[str, dict]:
             "clarifying_questions": f.get("clarifying_questions") or extras.get("clarifying_questions"),
             "citation": _as_dict(f.get("citation")),
             "cited_text": f.get("cited_text"),
+            "related_policies": [r for r in (f.get("related_policies") or []) if isinstance(r, dict)],
         }
     return out
 
@@ -247,6 +258,19 @@ def _finding_evidence(finding: dict, sources: _Sources) -> str:
         hits = retrieval.search(control, type="framework", top_k=1)
         if hits:
             parts.append("NIST control text:\n" + sources.render(hits[0]))
+    related = []
+    for item in (finding.get("related_policies") or [])[:MAX_RELATED_POLICIES]:
+        if not item.get("requirement_text") or not item.get("policy"):
+            continue
+        label = RELATED_LABELS.get(item.get("kind"), "also addresses this control")
+        related.append(f"{label} ({item.get('detail') or ''}; rated {item.get('coverage') or 'unknown'} there):\n"
+                       + sources.render({
+                           "chunk_id": f"related:{item.get('run_id')}:{item.get('finding_id')}",
+                           "text": item["requirement_text"], "source": item["policy"], "page": None,
+                           "locator": item.get("locator"), "type": "internal", "doc_kind": "policy", "score": 1.0}))
+    if related:
+        parts.append("What the organization's other reviewed policies say about the same control:\n"
+                     + "\n".join(related))
     return "\n\n".join(parts) or "No evidence text is available for this finding."
 
 

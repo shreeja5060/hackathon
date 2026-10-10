@@ -20,3 +20,9 @@ data/frameworks/*.json
 *.log
 
 .git/
+
+# Local review records: the image starts with an empty ledger (or restores it from
+# Cloud Storage, see deploy/README.md), never with a developer's test data.
+data/ledger*.sqlite3*
+data/.ledger*
+data/documents*/

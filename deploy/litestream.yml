@@ -1,0 +1,14 @@
+# Litestream keeps the ledger (two small SQLite files) safe on Cloud Run, where the
+# container's own disk disappears whenever an instance stops. It streams every change
+# to Cloud Storage (about a second behind), and deploy/start.sh restores the files
+# when a new instance starts. Set LEDGER_REPLICA_URL, e.g. gs://BUCKET/ledger.
+#
+# One writer only: run the service with max instances 1 (Litestream and SQLite both
+# assume a single writer). For several instances, move the ledger to Cloud SQL.
+dbs:
+  - path: ${LEDGER_PATH}
+    replica:
+      url: ${LEDGER_REPLICA_URL}/live
+  - path: ${LEDGER_SIM_PATH}
+    replica:
+      url: ${LEDGER_REPLICA_URL}/simulator

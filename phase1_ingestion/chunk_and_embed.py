@@ -165,7 +165,9 @@ def main():
     environment = read_json(environment_path) if environment_path.exists() else {"chunks": [], "sources": {}}
     inventory_path = PROCESSED / "inventory_bundle.json"
     inventory = read_json(inventory_path) if inventory_path.exists() else {"chunks": [], "sources": {}}
-    evidence = environment["chunks"] + inventory["chunks"]
+    logs_path = PROCESSED / "logs_bundle.json"
+    logs = read_json(logs_path) if logs_path.exists() else {"chunks": [], "sources": {}}
+    evidence = environment["chunks"] + inventory["chunks"] + logs["chunks"]
     original_chunks = policies + frameworks + evidence
 
     sources = read_json(PROCESSED / "policy_sources.json")
@@ -187,6 +189,9 @@ def main():
         if linked_source is None or linked_source.get("sha256") != inventory_source["linked_configuration_sha256"]:
             raise ValueError("Inventory/configuration snapshots differ. Rerun load_environment and load_inventory.")
     sources.update(inventory["sources"])
+    if sources.keys() & logs["sources"].keys():
+        raise ValueError("Duplicate security-log source filename")
+    sources.update(logs["sources"])
 
     if not original_chunks:
         raise ValueError("No chunks found.")

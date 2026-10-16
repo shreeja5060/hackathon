@@ -244,6 +244,71 @@ def test_suggestions_for_unknown_findings_are_dropped(app, monkeypatch):
     assert session.get("F-002").assistant_suggestion == "Require MFA."
 
 
+def _ask_with_suggestion(app, monkeypatch, finding_id, text):
+    backend = app.session_state["backends"]["simulated"]
+    monkeypatch.setattr(backend, "ask", lambda question, findings=None, history=None: {
+        "answer": "Here you go.", "citations": [],
+        "suggestions": [{"finding_id": finding_id, "recommendation": text}],
+    })
+    app.segmented_control(key="nav").set_value("Assistant").run()
+    app.chat_input(key="chat_input").set_value(f"Improve {finding_id}").run()
+    assert not app.exception
+    return f"move:{len(app.session_state['chat']) - 1}:{finding_id}"
+
+
+def _editable_ids(session):
+    return [f.finding_id for f in session.findings if f.approvable and f.coverage != "Full"]
+
+
+def test_moving_a_chat_suggestion_fills_the_chosen_recommendation_without_approving(app, monkeypatch):
+    session = run_sample_analysis(app)
+    suggested, other = _editable_ids(session)[:2]
+    original = session.get(other).recommendation
+    move = _ask_with_suggestion(app, monkeypatch, suggested, "Require MFA for all remote access.")
+
+    app.button(key=move).click().run()
+    assert app.selectbox(key=f"{move}:target").value == suggested  # the suggested finding is preselected
+    app.selectbox(key=f"{move}:target").set_value(other).run()
+    app.button(key=f"{move}:confirm").click().run()
+    assert not app.exception
+
+    assert app.session_state["nav"] == "Review" and app.session_state["focus_id"] == other
+    assert app.session_state[f"rec:{session.run.run_id}:{other}"] == "Require MFA for all remote access."
+    finding = session.get(other)
+    assert finding.status == "pending" and finding.recommendation == original  # nothing approved yet
+    buttons(app, "approve:")[0].click().run()
+    assert finding.status == "approved" and finding.final_recommendation == "Require MFA for all remote access."
+    assert finding.recommendation_origin == "assistant"
+
+
+def test_moving_a_suggestion_can_be_cancelled(app, monkeypatch):
+    session = run_sample_analysis(app)
+    target = _editable_ids(session)[0]
+    move = _ask_with_suggestion(app, monkeypatch, target, "Require MFA.")
+    app.button(key=move).click().run()
+    app.button(key=f"{move}:cancel").click().run()
+    assert app.session_state["nav"] == "Assistant"
+    assert not [s for s in app.selectbox if s.key == f"{move}:target"]
+    assert f"rec:{session.run.run_id}:{target}" not in app.session_state  # the box wasn't filled
+
+
+def test_moving_a_suggestion_into_a_decided_finding_reopens_it(app, monkeypatch):
+    session = run_sample_analysis(app)
+    target = app.session_state["focus_id"]
+    reject = buttons(app, "reject:")[0]
+    app.text_input(key=reject.key.replace("reject:", "note:")).input("Recommendation too generic").run()
+    app.button(key=reject.key).click().run()
+
+    move = _ask_with_suggestion(app, monkeypatch, target, "Require MFA.")
+    app.button(key=move).click().run()
+    app.button(key=f"{move}:confirm").click().run()
+    finding = session.get(target)
+    assert finding.status == "pending"
+    assert app.session_state[f"rec:{session.run.run_id}:{target}"] == "Require MFA."
+    actions = [e.action for e in session.audit_log]
+    assert actions.index("rejected") < actions.index("reopened")
+
+
 def test_assistant_failure_is_shown_not_raised(app, monkeypatch):
     run_sample_analysis(app)
     backend = app.session_state["backends"]["simulated"]

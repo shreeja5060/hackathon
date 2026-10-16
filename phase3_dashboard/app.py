@@ -1764,16 +1764,74 @@ def _render_suggestion_card(index: int, suggestion: dict) -> None:
         if session.finalized:
             st.caption("The review is finalized, so this can't be applied.")
             return
-        if st.button(f"Open {finding.finding_id} in review", key=f"open:{index}:{finding.finding_id}",
-                     icon=":material/open_in_new:"):
-            review.record_suggestion(session, finding.finding_id, suggestion["recommendation"],
-                                     st.session_state.get("reviewer_name", ""))
-            _persist(session)
-            _set_focus(finding.finding_id)
-            go_to(REVIEW)
+        move_key = f"move:{index}:{finding.finding_id}"
+        with st.container(horizontal=True, gap="small"):
+            if st.button("Move to a recommendation", key=move_key, icon=":material/move_down:",
+                         help="Puts this wording in a finding's recommendation box. Nothing changes until "
+                              "you approve it in the review."):
+                st.session_state["_moving"] = move_key
+            if st.button(f"Open {finding.finding_id} in review", key=f"open:{index}:{finding.finding_id}",
+                         icon=":material/open_in_new:", type="tertiary"):
+                review.record_suggestion(session, finding.finding_id, suggestion["recommendation"],
+                                         st.session_state.get("reviewer_name", ""))
+                _persist(session)
+                _set_focus(finding.finding_id)
+                go_to(REVIEW)
+        if st.session_state.get("_moving") == move_key:
+            _render_move_confirmation(session, finding, suggestion["recommendation"], move_key)
+            return
         state = "It's waiting on the finding for your decision." if finding.status == "pending" else (
             f"{finding.finding_id} is already {finding.status}; you can reopen it from the review to use this.")
         st.caption(state)
+
+
+def _render_move_confirmation(session, suggested, text: str, move_key: str) -> None:
+    """Ask which finding's recommendation the wording replaces, then fill it in for the reviewer to approve."""
+    targets = [f for f in session.findings if f.approvable and f.coverage != "Full"]
+    if not targets:
+        st.caption("No finding in this review has a recommendation that can be edited.")
+        return
+    ids = [f.finding_id for f in targets]
+    by_id = {f.finding_id: f for f in targets}
+    target_id = st.selectbox(
+        "Which finding's recommendation should this replace?", ids,
+        index=ids.index(suggested.finding_id) if suggested.finding_id in ids else 0,
+        key=f"{move_key}:target",
+        format_func=lambda fid: f"{fid} · {by_id[fid].requirement}")
+    target = by_id[target_id]
+    st.markdown(f"**Current recommendation:** {escape_md(target.final_recommendation or 'None')}")
+    if target.status != "pending":
+        st.caption(f"{target_id} is already {target.status}. Moving the wording reopens it so you can approve "
+                   "the new recommendation.")
+    with st.container(horizontal=True, gap="small"):
+        confirm = st.button("Confirm and move", key=f"{move_key}:confirm", type="primary",
+                            icon=":material/check:")
+        cancel = st.button("Cancel", key=f"{move_key}:cancel", type="tertiary")
+    if cancel:
+        st.session_state.pop("_moving", None)
+        st.rerun()
+    if confirm:
+        _move_suggestion(session, target, text)
+
+
+def _move_suggestion(session, target, text: str) -> None:
+    if not _guard(session):
+        st.rerun()
+    reviewer = _reviewer()
+    try:
+        if target.status != "pending":
+            review.reopen(session, target.finding_id, reviewer)
+        review.record_suggestion(session, target.finding_id, text, reviewer)
+    except review.ReviewError as exc:
+        st.error(escape_md(str(exc)), icon=":material/error:")
+        return
+    _persist(session)
+    # The review page fills its recommendation box from this key, so the reviewer sees the new wording there.
+    st.session_state[f"rec:{session.run.run_id}:{target.finding_id}"] = target.assistant_suggestion
+    st.session_state.pop("_moving", None)
+    _set_focus(target.finding_id)
+    go_to(REVIEW, f"Moved the assistant's wording into {target.finding_id}'s recommendation. "
+                  "Review it and approve when you're ready.")
 
 
 def _render_chat_message(index: int, message: dict) -> None:
